@@ -1,7 +1,8 @@
-using JuliaTypechecker, JuliaSyntax, Overseer
+using JuliaTypechecker, JuliaSyntax, Overseer, SymbolServer
 using SemanticAST
 import SemanticAST: just_argslist, flatten_where_expr, analyze_typevar, ASTException, ASTNode
-import JuliaTypechecker: Binding, Path, PathInfo, analyze_scope, ModuleDefinition, IncludeFiles, TypeError, get_definition, get_definition_descending, analyze_bindings
+import JuliaTypechecker: Binding, Path, PathInfo, analyze_scope, ModuleDefinition, IncludeFiles, TypeError, get_definition, get_definition_descending, analyze_bindings, ScopeInfo, InFile, Definition, ToplevelContext
+import JuliaTypechecker: convert_runtime_type, JuliaType, NominalType, TypeVarType, TupleType, UnionType, AnyType, UnionAllType, TypeLitType, TypeVarDef
 using Test
 const SN = JuliaSyntax.SyntaxNode
 const SH = JuliaSyntax.SyntaxHead
@@ -87,7 +88,8 @@ struct ErrorResult end
                 stage = Stage(:typechecker, [])
                 m = Ledger(stage)
 				r = DictFileSource(Dict{String, String}())
-				ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r)
+				ssi = SymbolServerInstance(".", nothing)
+				ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
                 JuliaTypechecker.to_entities(ctx, expand_toplevel(childof(JuliaSyntax.parseall(SN, input), 1), ExpandCtx(true, false)), nothing)
 				@test true
 			end
@@ -95,51 +97,36 @@ struct ErrorResult end
 	end
 end
 
-has_module(c::TypecheckContext, s::PathInfo, p::Path) = 
-	if length(p) > 0
-		bnd = get_definition(c, s, first(p))
-		if !isnothing(bnd) && bnd.source isa ModuleDefinition 
-			has_module(c, bnd.source.local_scope, p[2:end])
-		else 
-			false
-		end
-	else
-		true
-	end
-
-has_error(c::TypecheckContext) = !isempty(@entities_in(c.ledger[TypeError]))
-
-has_binding(c::TypecheckContext, s::PathInfo, b::Symbol) = get_definition(c, s, b) != nothing
+has_error(c::TypecheckContext) = TypeError in c.ledger && !isempty(@entities_in(c.ledger[TypeError]))
+has_file(ctx::TypecheckContext, filename::String) = any(e->e.path == filename, @entities_in(ctx.ledger, InFile))
 
 scope_tests() = [
-	:modules => [
-		["root" => "module Foo end"] => (c, s) -> has_module(c, s, [:Foo]),
-		["root" => "module Foo end; module Bar end"] => (c, s) -> has_module(c, s, [:Foo]) && has_module(c, s, [:Bar]),
-		["root" => "module Foo module Bar end end"] => (c, s) -> has_module(c, s, [:Foo]) && has_module(c, s, [:Foo, :Bar]),
-		["root" => "module Foo module Bar end; module Baz end end"] => (c, s) -> has_module(c, s, [:Foo]) && has_module(c, s, [:Foo, :Bar]) && has_module(c, s, [:Foo, :Baz])
-	],
 	:includes => [
-		["root" => "include(\"testme.jl\")", "testme.jl" => "module Foo end"] => (c, s) -> has_module(c, s, [:Foo])
-		["root" => "include(\"testme.jl\")", "testme.jl" => "include(\"testme2.jl\")", "testme2.jl"=>"module Foo end"] => (c, s) -> has_module(c, s, [:Foo])
-		["root" => "module Foo include(\"testme.jl\") end", "testme.jl" => "module Bar end"] => (c, s) -> has_module(c, s, [:Foo, :Bar])
+		["root" => "include(\"testme.jl\")", "testme.jl" => "module Foo end"] => (c, s) -> !has_error(c) && has_file(c, "testme.jl"),
+		["root" => "include(\"testme.jl\")", "testme.jl" => "include(\"testme2.jl\")", "testme2.jl"=>"module Foo end"] => (c, s) -> !has_error(c) && has_file(c, "testme.jl") && has_file(c, "testme2.jl"),
+		["root" => "module Foo include(\"testme.jl\") end", "testme.jl" => "module Bar end"] => (c, s) -> !has_error(c) && has_file(c, "testme.jl"),
+		["root" => "module Foo include(\"testme2.jl\") end"] => (c, s) -> has_error(c),
+		["root" => "module Foo include(\"testme.jl\") end", "testme.jl" => "module Bar end", "testme2.jl" => "module Baz end"] => (c, s) -> !has_error(c) && has_file(c, "testme.jl") && !has_file(c, "testme2.jl"),
 	]
 ]
-@testset "Scope analysis" begin 
-	@testset "$head" for (head, tests) in scope_tests() 
+
+@testset "File structure analysis" begin
+	@testset "$head" for (head, tests) in scope_tests()
 		for (fileset, predicate) in tests 
 			filedict = Dict{String, String}(fileset)
 			r = DictFileSource(filedict)
 			stage = Stage(:typechecker, [])
 			m = Ledger(stage)
-			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r)
+			ssi = SymbolServerInstance(".", nothing)
+			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
 
 			entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, filedict["root"]), ExpandCtx(true, false))
 			JuliaTypechecker.to_entities(ctx, entry, nothing)
 			root = m[ctx.node_mapping[entry]]
 			
-			toplevel_scope = PathInfo([:Main], root, nothing, [], Dict{Symbol, Binding}(), Set{Symbol}())
+			toplevel_scope = ScopeInfo([:Main], root, nothing, [])
 			m[ctx.node_mapping[entry]] = toplevel_scope
-			m[ctx.node_mapping[entry]] = IncludeFiles("", [])
+			m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("")
 			
 			analyze_scope(ctx, [:Main], toplevel_scope, entry)
 			@test predicate(ctx, toplevel_scope)
@@ -147,56 +134,104 @@ scope_tests() = [
 	end
 end
 
+has_definition(c::ToplevelContext, n::Symbol) = haskey(c.bindings, n)
+has_definition(c::Base.ImmutableDict, n::Symbol) = haskey(c, n)
+function has_definition(c::Union{ToplevelContext,Base.ImmutableDict}, ns::Vector{Symbol})
+	for n in ns
+		if !haskey(c, n)
+			return false 
+		end
+		c = c[n]
+	end
+	return true
+end
 binding_tests() = [
-	:usings => [
-		["root" => "using Test"] => (c, s) -> true,
-		["root" => "using Test, Example"] => (c, s) -> true,
-		["root" => "using Main: Test as Testme"] => (c, s) -> true,
-		["root" => "using Test.Bar"] => (c, s) -> true,
-		["root" => "using Test.Bar: baz"] => (c, s) -> true,
-		["root" => "using ..Bar: bing as Bing"] => (c, s) -> has_error(c)
+	:modules => [
+		["root" => "module Test end"] => (c,s) -> @test(has_definition(c, :Test))
+		["root" => "module Test module Bar end end"] => (c,s) -> begin @test(has_definition(c, :Test)); @test(has_definition(c, [:Test, :Bar])) end
+		["root" => "module Test include(\"testme.jl\") end", "testme.jl"=>"module Bar end"] => (c,s) -> begin @test(has_definition(c, :Test)); @test(has_definition(c, [:Test, :Bar])) end
 	],
-	:imports => [
-		["root" => "import Foo"] => (c, s) -> has_binding(c, s, :Foo),
-		["root" => "import Foo.bar"] => (c, s) -> has_binding(c, s, :bar),
-		["root" => "import Foo: bar, baz"] => (c, s) -> has_binding(c, s, :bar) && has_binding(c, s, :baz),
-		["root" => "import .Foo: bar"] => (c, s) -> has_binding(c, s, :bar),
-		["root" => "import Foo.bar as bing, Foo.baz"] => (c, s) -> has_binding(c, s, :bing) && has_binding(c, s, :baz)
-	],
-	:exports => [
-		["root" => "export baz, bing"] => (c, s) -> true
-	],
-	:simple_defns => [
-		["root" => "x = 3"] => (c, s) -> has_binding(c, s, :x),
-		["root" => "x::Int = 3"] => (c, s) -> has_binding(c, s, :x),
-		["root" => "x = 3; y = 9"] => (c, s) -> has_binding(c, s, :x) && has_binding(c, s, :y),
-		["root" => "x = []"] => (c, s) -> has_binding(c, s, :x),
-		["root" => "(x, y) = []"] => (c, s) -> has_binding(c, s, :x) && has_binding(c, s, :y),
-		["root" => "(;x, y) = (x=2, y=3)"] => (c, s) -> has_binding(c, s, :x) && has_binding(c, s, :y),
-		["root" => "x{y} = Vector{y}"] => (c, s) -> has_binding(c, s, :x)
-		
+	:definitions => [
+		["root" => "x=2"] => (c,s) -> @test(has_definition(c, [:x]))
 	]
 ]
-@testset "Binding analysis" begin 
-	@testset "$head" for (head, tests) in binding_tests() 
+
+
+@testset "Binding analysis" begin
+	@testset "$head" for (head, tests) in binding_tests()
 		for (fileset, predicate) in tests 
 			filedict = Dict{String, String}(fileset)
 			r = DictFileSource(filedict)
 			stage = Stage(:typechecker, [])
 			m = Ledger(stage)
-			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r)
+			ssi = SymbolServerInstance(".", nothing)
+			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
 
 			entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, filedict["root"]), ExpandCtx(true, false))
 			JuliaTypechecker.to_entities(ctx, entry, nothing)
 			root = m[ctx.node_mapping[entry]]
 			
-			toplevel_scope = PathInfo([:Main], root, nothing, [], Dict{Symbol, Binding}(), Set{Symbol}())
+			toplevel_scope = ScopeInfo([:Main], root, nothing, [])
 			m[ctx.node_mapping[entry]] = toplevel_scope
-			m[ctx.node_mapping[entry]] = IncludeFiles("", [])
+			m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("")
 			
 			analyze_scope(ctx, [:Main], toplevel_scope, entry)
-			analyze_bindings(ctx, toplevel_scope, entry)
-			@test predicate(ctx, toplevel_scope)
+			tctx = ToplevelContext(nothing, Base.ImmutableDict{Symbol, Definition}(), [], [])
+			fctx = analyze_bindings(ctx, tctx, entry)
+			predicate(fctx, toplevel_scope)
 		end
 	end
+end
+
+@testset "type conversions" begin 
+	#=
+	@testset "runtime to static" begin 
+		@test convert_runtime_type(Any) == AnyType()
+		@test convert_runtime_type(Int) == NominalType([:Core, :Int64], [])
+		@test convert_runtime_type(Vector{Int}) == NominalType([:Core, :Array], JuliaType[NominalType([:Core, :Int64], JuliaType[]), TypeLitType(JuliaTypechecker.ValueTypeLit(1))])
+		@test convert_runtime_type(Union{Int, String}) == UnionType(JuliaType[NominalType([:Core, :Int64], JuliaType[]), NominalType([:Core, :String], JuliaType[])])
+		@test convert_runtime_type(Tuple{Int, String}) == TupleType(JuliaType[NominalType([:Core, :Int64], JuliaType[]), NominalType([:Core, :String], JuliaType[])])
+		@test convert_runtime_type(Union{}) == UnionType(JuliaType[])
+		@test convert_runtime_type(Tuple{T, T} where T) == UnionAllType(TupleType(JuliaType[TypeVarType(:T), TypeVarType(:T)]), [TypeVarDef(UnionType([]), :T, AnyType())])
+		@test convert_runtime_type(Union{Int, T} where Int<:T<:Number) == UnionAllType(UnionType([NominalType([:Core, :Int64], JuliaType[]), TypeVarType(:T)]), [TypeVarDef(NominalType([:Core, :Int64], []), :T, NominalType([:Core, :Number], []))])
+	end
+	=#
+	parse_type_expr(text) = expand_forms(JuliaSyntax.child(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, text), 1), ExpandCtx(true, false))
+	@testset "expression to static" begin 
+		filedict = Dict{String, String}()
+		r = DictFileSource(filedict)
+		stage = Stage(:typechecker, [])
+		m = Ledger(stage)
+		ssi = SymbolServerInstance(".", nothing)
+		ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+		default_context = JuliaTypechecker.LocalContext(ctx, Base.ImmutableDict{Symbol, JuliaTypechecker.JlType}(), nothing)
+
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Any"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Any)
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Int"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Int)
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Vector{Int}"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Vector{Int})
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Tuple{Int, String}"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Tuple{Int, String})
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Union{Int, String}"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Union{Int, String})
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Union{}"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Union{})
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Tuple{T, T} where T"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Tuple{T, T} where T)
+		@test JuliaTypechecker.convert_type(default_context, parse_type_expr("Union{Int, T} where Int<:T<:Number"), Base.ImmutableDict{Symbol, TypeVar}()) == JuliaTypechecker.BasicType(Union{Int, T} where Int<:T<:Number)
+	end
+	
+end
+
+parse_expr(text) = expand_forms(JuliaSyntax.child(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, text), 1), ExpandCtx(true, false))
+@testset "typechecking" begin 
+	filedict = Dict{String, String}()
+	r = DictFileSource(filedict)
+	stage = Stage(:typechecker, [])
+	m = Ledger(stage)
+	ssi = SymbolServerInstance(".", nothing)
+	ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+	default_context = JuliaTypechecker.LocalContext(ctx, Base.ImmutableDict{Symbol, JuliaTypechecker.JlType}(), nothing)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("function f(x) x end"))) == JuliaTypechecker.BasicType(Function)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("2 + 2"))) == JuliaTypechecker.BasicType(Int)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("begin x = 2 * 2 + 3; y = 8 + x; y end"))) == JuliaTypechecker.BasicType(Int)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("begin x = 2 * 2 + 3.0; y = 8 + x; y end"))) == JuliaTypechecker.BasicType(Float64)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("begin x = Ref(3); x.x end"))) == JuliaTypechecker.BasicType(Int)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("let x = 9; x end"))) == JuliaTypechecker.BasicType(Int)
+	@test last(JuliaTypechecker.typecheck_expression(default_context, parse_expr("let x = 9; x += 11 end"))) == JuliaTypechecker.BasicType(Int)
 end

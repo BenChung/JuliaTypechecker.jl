@@ -1,147 +1,177 @@
-@component struct Reference
-    binding::Entity 
+abstract type JType end
+
+struct TypeVarDef
+	lb::JType
+	var::Symbol
+	ub::JType
+end
+@as_record TypeVarDef
+
+@data TypeLitValue begin
+	TypeTypeLit(JType)
+	ValueTypeLit(Any)
 end
 
-struct ImportedDefinition <: SourceInfo 
-    path::Path
-    extensible::Bool
+const NamePath = Vector{Symbol}
+@data JuliaType <: JType begin
+	NominalType(NamePath, Vector{JuliaType})
+	TupleType(Vector{JuliaType})
+	UnionType(Vector{JuliaType})
+	AnyType()
+	UnionAllType(JuliaType, Vector{TypeVarDef})
+	TypeVarType(Symbol)
+	TypeLitType(TypeLitValue)
 end
-struct ModuleReference <: SourceInfo
-    path::Path
-    searched::Bool
+@generated function Base.:(==)(a::T, b::T) where T<:Union{JType, TypeVarDef}
+	if length(fieldnames(T)) == 0 
+		return true
+	end
+	return :(Base.:(&)($(map(x->:(a.$x == b.$x), fieldnames(T))...)))
 end
 
-struct ToplevelDefinition <: SourceInfo
+abstract type Definition end
+abstract type ScopeDefinition <: Definition end
+
+mutable struct ToplevelContext
+	parent::Union{ToplevelContext, Nothing}
+	bindings::Base.ImmutableDict{Symbol, Definition}
+	search::Vector{ScopeDefinition}
+	exports::Vector{Symbol}
 end
-struct LocalDefinition <: SourceInfo
+root_context(t::ToplevelContext) = isnothing(t.parent) ? t : root_context(t.parent)
+
+struct ValueDefinition <: Definition
+	source::Entity
 end
-struct FunctionDefinition <: SourceInfo
+struct TypeDefinition <: Definition
+	source::Entity
+	fields::Dict{Symbol, JuliaType}
+	extensible::Bool
+end
+struct ModuleDefinition <: ScopeDefinition
+	source::Entity
+	ctx::ToplevelContext
+end
+struct SymbolServerDefinition <: ScopeDefinition
+	source::Entity
+	store::SymbolServer.ModuleStore
 end
 
+make_extensible(::Definition) = nothing
+make_extensible(t::TypeDefinition) = t.extensible = true
 
-const Scope = Base.ImmutableDict
-empty_scope() = Scope{Symbol, Binding}()
+Base.haskey(l::ModuleDefinition, n::Symbol) = haskey(l.ctx, n)
+Base.haskey(t::ToplevelContext, n::Symbol) = n in keys(t.bindings)
+Base.getindex(s::ToplevelContext, n::Symbol) = s.bindings[n]
+Base.getindex(s::SymbolServerDefinition, n::Symbol) = s.store[n]
+Base.getindex(l::ModuleDefinition, n::Symbol) = l.ctx[n]
+Base.getindex(d::ScopeDefinition, n::Vector{Symbol}) = 
+	if length(n) == 1 
+		d[n[1]]
+	else 
+		d[last(n)][n[1:end-1]]
+	end
 
-get_scopeinfo(l::TypecheckContext, path::Path) = get_scopeinfo(l, l.root_scope, path)
-function get_scopeinfo(l::TypecheckContext, scope::ScopeInfo, path::Path)
-    if length(path) == 0 return scope end
-    if haskey(scope.definitions, first(path))
-        binding = scope.definitions[first(path)]
-        if binding.source isa ModuleDefinition
-            return get_scopeinfo(l, binding.source.local_scope, path[2:end])
-        elseif binding.source isa ModuleReference
-            # what to do here?
+
+bind_function_name(ctx::TypecheckContext, tctx::ToplevelContext, name::FunctionName) = @match name begin
+	ResolvedName(path::Vector{Symbol}, loc) => 
+		if length(path) == 1 && !haskey(tctx.bindings, first(path))
+			tctx.bindings = Base.ImmutableDict(tctx.bindings, first(path) => TypeDefinition(ctx.node_mapping[name], Dict{Symbol, JuliaType}(), true))
+		end
+	DeclName(binding::Union{LValue, Nothing}, typ::Expression, loc) => nothing
+	TypeFuncName(receiver::Expression, args::Vector{Union{Expression, TyVar}}, loc) => nothing
+	AnonFuncName(loc) => nothing
+end
+analyze_toplevel_lvalue(ctx::TypecheckContext, tctx::ToplevelContext, expr::SemanticAST.LValue) = @match expr begin 
+	IdentifierAssignment(id::Symbol, loc) => begin tctx.bindings = Base.ImmutableDict(tctx.bindings, id=>ValueDefinition(ctx.node_mapping[expr])) end
+	OuterIdentifierAssignment(id::Symbol, loc) => nothing
+	FieldAssignment(obj::Expression, name::Symbol, loc) => nothing
+	TupleAssignment(params::Vector{LValue}, loc) => map(param -> analyze_toplevel_lvalue(ctx, tctx, param), params)
+	RefAssignment(arr::Expression, arguments::Vector{PositionalArgs}, kwargs::Vector{KeywordArg}, loc) => nothing
+	VarargAssignment(tgt::Union{Nothing, LValue}, loc) => nothing
+	TypedAssignment(lhs::LValue, type::Expression, loc) => analyze_toplevel_lvalue(ctx, tctx, lhs)
+	NamedTupleAssignment(params::Vector{Union{IdentifierAssignment, TypedAssignment}}, loc) => map(param->analyze_toplevel_lvalue(param), params)
+	FunctionAssignment(name::FunctionName, args_stmts::Vector{FnArg}, kwargs_stmts::Vector{KwArg}, sparams::Vector{TyVar}, rett::Union{Expression, Nothing}, loc) => 
+		bind_function_name(ctx, tctx, name)
+	BroadcastAssignment(lhs::LValue, loc) => nothing
+    UnionAllAssignment(name::LValue, tyargs::Vector{TyVar}, loc) => analyze_toplevel_lvalue(ctx, tctx, name)
+end
+analyze_bindings(ctx::TypecheckContext, tctx::ToplevelContext, expr::SemanticAST.ToplevelStmts) = @match expr begin
+    ToplevelStmt(exprs, _) => foldl((tctx, exp) -> analyze_bindings(ctx, tctx, exp), exprs; init=tctx)
+    ModuleStmt(std_imports, name, body, _) && m => 
+    	let ictx = ToplevelContext(tctx, Base.ImmutableDict{Symbol, Definition}(), [], []);
+    	tctx.bindings = Base.ImmutableDict(tctx.bindings, name => 
+    		ModuleDefinition(ctx.node_mapping[m], foldl((tctx, exp) -> analyze_bindings(ctx, tctx, exp), body; init=ictx)));
+    	tctx
+    	end
+    UsingStmt(paths, _) => foldl((tctx, path) -> analyze_using(ctx, tctx, path), paths; init=tctx)
+    ImportStmt(paths, _) => foldl((tctx, path) -> analyze_import(ctx, tctx, path), paths; init=tctx)
+    SourceUsingStmt(source, paths, _) => foldl((tctx, path) -> analyze_using(l, source, path), paths; init=tctx)
+    SourceImportStmt(source, paths, _) => foldl((tctx, path) -> analyze_import(l, source, path), paths; init=tctx)
+    ExportStmt(syms, _) => foldl((tctx, exp) -> analyze_export(tctx, exp), syms; init=tctx)
+    ExprStmt(Assignment(lvalue, value, il), _) => analyze_toplevel_lvalue(ctx, tctx, lvalue)
+    ExprStmt(FunCall(Variable(:include, _), [PositionalArg(StringInterpolate([filepath], _), _)], _, _), _) => 
+        let includefile = ctx.ledger[ctx.node_mapping[expr]][IncludeFile];
+            new_root = includefile.include;
+            new_ast = ctx.ledger[new_root][ASTComponent].node
+            analyze_bindings(ctx, tctx, new_ast)
         end
-        raise("missing module $(path)")
-    else 
-
-    end
-end
-
-function toplevel_bind(l::TypecheckContext, name::Symbol, at::ASTNode, src::SourceInfo)
-    binding = Binding(at.location, src)
-    l.ledger[l.node_mapping[at]] = binding
-
-    scope = find_parent_component(ScopeInfo, l, at)
-    scope.definitions[name] = binding
-    return binding
-end
-
-function local_bind(l::TypecheckContext, lctx::Scope, name::Symbol, at::ASTNode, src::SourceInfo)
-    binding = Binding(at.location, src)
-    l.ledger[l.node_mapping[at]] = binding
-    return LocalScope(lctx, name=>binding)
-end
-
-function toplevel_bind_function(ctx::TypecheckContext, bctx::ScopeInfo, name::FunctionName, info::SourceInfo)
-    @match name begin 
-        ResolvedName(path::Vector{Symbol}, _) =>
-            if length(path) == 1
-                toplevel_bind(l, path[1], name, info)
-            else 
-
-            end
-        DeclName(binding::Union{LValue, Nothing}, typ::Expression, _) =>
-        TypeFuncName(receiver::Expression, args::Vector{Union{Expression, TyVar}}, _) =>
-        AnonFuncName(_) =>
-    end
-end
-
-analyze_toplevel_lvalue(ctx::TypecheckContext, bctx::ScopeInfo, lctx::Scope, lvalue::LValue) = @match lvalue begin 
-	IdentifierAssignment(id::Symbol, _) => id => toplevel_bind(ctx, id, lvalue, ToplevelDefinition())
-	OuterIdentifierAssignment(id::Symbol, _) => make_error(ctx, lvalue, "Invalid outer assignment at top level") 
-	FieldAssignment(obj::Expression, name::Symbol, l) => lctx
-	TupleAssignment(params::Vector{LValue}, _) => foldl((lenv, exp)->analyze_toplevel_lvalue(ctx, benv, lenv, lctx), params; init=lctx)
-	RefAssignment(arr::Expression, arguments::Vector{PositionalArgs}, kwargs::Vector{KeywordArg}, l) => lctx
-	VarargAssignment(tgt::Union{Nothing, LValue}, l) => lctx
-	TypedAssignment(lhs::LValue, type::Expression, _) => analyze_toplevel_lvalue(ctx, bctx, lctx, lhs)
-	NamedTupleAssignment(params::Vector{Union{IdentifierAssignment, TypedAssignment}}, _) => analyze_toplevel_lvalue.((ctx, ), (lctx, ), params)
-	FunctionAssignment(name::FunctionName, args_stmts::Vector{FnArg}, kwargs_stmts::Vector{KwArg}, sparams::Vector{TyVar}, rett::Union{Expression, Nothing}, _) =>
-        throw("Unimplemented") # todo implement local/nonlocal function definitions
-	BroadcastAssignment(lhs::LValue, l) => lctx
-    UnionAllAssignment(name::LValue, tyargs::Vector{TyVar}, _) => 
-        let lenv = foldl((lctx, el) -> local_bind(ctx, lctx, el.name, el, LocalDefinition()), tyargs; init=lctx)
-            analyze_toplevel_lvalue(ctx, bctx, lctx, name)
-        end
+    _ => begin println(expr); return tctx end
 end
 
 
-analyze_bindings(l::TypecheckContext, binding_scope::ScopeInfo, expr::SemanticAST.ToplevelStmts) = @match expr begin 
-    ToplevelStmt(exprs, _) => map(exp -> analyze_bindings(l, binding_scope, exp), exprs)
-    ModuleStmt(std_imports, name, body, _) && m => map(exp -> analyze_bindings(l, binding_scope, exp), body)
-    UsingStmt(paths, _) => map(path -> analyze_using(l, binding_scope, path), paths)
-    ImportStmt(paths, _) => map(path -> analyze_import(l, binding_scope, path), paths)
-    SourceUsingStmt(source, paths, _) => map(path -> analyze_using(l, binding_scope, source, path), paths)
-    SourceImportStmt(source, paths, _) => map(path -> analyze_import(l, binding_scope, source, path), paths)
-    ExportStmt(syms, _) => push!.((scope.exports,), analyze_export.(syms))
-    ExprStmt(Assignment(lvalue, value, il), _) => analyze_toplevel_lvalue(l, binding_scope, LocalScope{Symbol, Binding}(), lvalue)
-    _ => println(expr)
+resolve_path(ctx::TypecheckContext, tctx::ToplevelContext, path::ImportPath) = @match path begin
+       ImportField(source::ImportPath, name::Symbol, _) => resolve_path(ctx, scope, source)[name]
+       ImportId(name::Symbol, _) => SymbolServerReference(ctx.node_mapping[path], ctx.store[name])
+       ImportRelative(levels::Int, _) => LocalReference(foldl((pkg, _) -> 
+       	if isnothing(pkg.parent)
+       		make_error(ctx, path)
+       		pkg
+       	else
+       		pkg.parent
+       	end, enumerate(levels); init=tctx))
 end
 
-inferred_name(path) = last(path)
-
-resolve_path(ctx::TypecheckContext, scope::ScopeInfo, path::ImportPath) = @match path begin 
-	ImportField(source::ImportPath, name::Symbol, _) => [resolve_path(ctx, scope, source); name]
-	ImportId(name::Symbol, _) => [name]
-	ImportRelative(levels::Int, _) =>
-        if length(scope.path) >= levels
-            scope.path[1:end-levels]
-        else
-            make_error(ctx, path, "Invalid relative path")
-            return scope.path
-        end
+resolve_path(ctx::TypecheckContext, bnd::ScopeDefinition, path::ImportPath) = @match path begin
+       ImportField(source::ImportPath, name::Symbol, _) => resolve_path(ctx, bnd, source)[name]
+       ImportId(name::Symbol, _) => bnd[name]
+       ImportRelative(levels::Int, _) => begin make_error(ctx, path); bnd end
 end
 
-analyze_using(ctx::TypecheckContext, scope::ScopeInfo, path::ImportPath) = let 
-    binding = Binding(path.location, ModuleReference(resolve_path(ctx, scope, path), true));
-        ctx.ledger[ctx.node_mapping[path]] = binding
-        scope.definitions[inferred_name(resolved)] = binding
-    end
+inferred_name(path::ImportPath) = @match path begin
+   ImportField(source::ImportPath, name::Symbol, _) => name
+   ImportId(name::Symbol, _) => name
+   ImportRelative(levels::Int, _) => nothing
+end
 
-analyze_import(ctx::TypecheckContext, scope::ScopeInfo, path::DepClause) = @match path begin 
-    Dep(import_path, _) => begin 
-        binding = Binding(path.location, ModuleReference(resolve_path(ctx, scope, import_path), false))
-        ctx.ledger[ctx.node_mapping[path]] = binding
-        scope.definitions[inferred_name(resolved)] = binding
-    end
+function analyze_using(ctx::TypecheckContext, tctx::ToplevelContext, path::ImportPath)
+	resolved = resolve_path(ctx, tctx, path)
+	tctx.bindings = Base.ImmutableDict{Symbol, Definition}(tctx.bindings, inferred_name(path) => resolved)
+	push!(tctx.search, resolved)
+	tctx
+end
+
+analyze_import(ctx::TypecheckContext, tctx::ToplevelContext, path::DepClause) = @match path begin
+    Dep(import_path, _) => begin
+		resolved = resolve_path(ctx, tctx, import_path)
+		tctx.bindings = Base.ImmutableDict{Symbol, Definition}(tctx.bindings, inferred_name(import_path) => resolved)
+		return tctx
+	end
     AliasDep(import_path, name, _) => begin
-        binding = Binding(path.location, ModuleReference(resolve_path(ctx, scope, import_path), false)) 
-        ctx.ledger[ctx.node_mapping[path]] = binding
-        scope.definitions[name] = binding
+		resolved = resolve_path(ctx, tctx, import_path)
+		tctx.bindings = Base.ImmutableDict{Symbol, Definition}(tctx.bindings,  name => resolved)
+		return tctx
     end
 end
 
-analyze_common_reference(ctx::TypecheckContext, scope::ScopeInfo, expr::ASTNode, source_path::ImportPath, using_path::ImportPath, force_name::Union{Nothing, Symbol}=nothing, extensible::Bool=false) = 
+analyze_common_reference(ctx::TypecheckContext, tctx::ToplevelContext, source_path::ImportPath, using_path::ImportPath, force_name::Union{Nothing, Symbol}=nothing, extensible::Bool=false) =
     begin 
-        resolved = [resolve_path(ctx, scope, source_path); resolve_path(ctx, scope, using_path)];
-        binding = Binding(using_path.location, ImportedDefinition(resolved, extensible))
-        ctx.ledger[ctx.node_mapping[expr]] = binding
-        scope.definitions[isnothing(force_name) ? inferred_name(resolved) : force_name] = binding
+    	def = resolve_path(ctx, resolve_path(ctx, tctx, source_path), using_path)
+    	tctx.bindings = Base.ImmutableDict{Symbol, Definition}(tctx.bindings, inferred_name(using_path) => extensible ? make_extensible(def) : def)
+    	tctx
     end
-analyze_using(ctx::TypecheckContext, scope::ScopeInfo, source_path::ImportPath, path::DepClause, can_extend=false) = @match path begin 
+analyze_using(ctx::TypecheckContext, source_path::ImportPath, path::DepClause, can_extend=false) = @match path begin
     Dep(import_path, _) => analyze_common_reference(ctx, scope, path, source_path, import_path, nothing, can_extend)
     AliasDep(import_path, name, _) => analyze_common_reference(ctx, scope, path, source_path, import_path, name, can_extend)
 end
-analyze_import(ctx::TypecheckContext, scope::ScopeInfo, basepath::ImportPath, path::DepClause) = analyze_using(ctx, scope, basepath, path, true)
-
-analyze_export(sym) = sym
+analyze_import(ctx::TypecheckContext, basepath::ImportPath, path::DepClause) = analyze_using(ctx, scope, basepath, path, true)
