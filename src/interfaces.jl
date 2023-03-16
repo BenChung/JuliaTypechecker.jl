@@ -10,6 +10,7 @@ unvar(t::UnionAll) = t
 unvar(t::TypeVar) = t.ub
 unvar(r) = r
 function find_instance_of_super(bodyty::DataType, ttyname::Core.TypeName)
+    println("finding $ttyname from $bodyty")
     if bodyty == Any
         if ttyname != Any.name
             return nothing
@@ -22,22 +23,31 @@ function find_instance_of_super(bodyty::DataType, ttyname::Core.TypeName)
     end 
     return find_instance_of_super(supertype(bodyty), ttyname)
 end
-find_instance_of_super(bodyty::UnionAll, ttyname::Core.TypeName) =
+function find_instance_of_super(bodyty::UnionAll, ttyname::Core.TypeName)
+    println("finding $ttyname from $bodyty")
     if unfold(bodyty).name == ttyname 
         bodyty
     else
         find_instance_of_super(supertype(bodyty), ttyname)
     end
+end
 
+isinstance(a::Core.TypeofVararg,ttyname) = a.T <: ttyname.wrapper || (a.T isa DataType && a.T.name.wrapper <: ttyname.wrapper)
 isinstance(a,ttyname) = a <: ttyname.wrapper || (a isa DataType && a.name.wrapper <: ttyname.wrapper)
 
 function specialize_matrix(pats::Vector{<:Vector{<:Any}}, ttyname)
     out = Vector{Any}[]
     for pat in pats 
+        if isempty(pat)
+            continue 
+        end
         fp = unfold(first(pat))
         rest = pat[2:end]
         arity = params(ttyname.wrapper)
-        println("pat: $fp against: $ttyname isinstance: $(isinstance(fp, ttyname))")
+        if fp isa Core.TypeofVararg
+            append!(out, specialize_matrix([[fp.T; fp; rest], rest], ttyname))
+            continue
+        end
         if fp == Any
             push!(out, [repeat([Any], arity); rest])
         elseif fp isa UnionAll && isinstance(fp, ttyname)
@@ -64,7 +74,7 @@ function specialize_types(match::Vector{<:Any}, ttyname::Core.TypeName)
     rest = match[2:end]
     #println(supertype(ttyname.wrapper))
     #println(unfold(find_instance_of_super(ttyname.wrapper, unfold(fp).name)).parameters)
-    out = [rest]#[unvar.(unfold(fp).parameters); rest]
+    out = rest#[unvar.(unfold(fp).parameters); rest]
     println("specialized types $out for $match under $ttyname")
     return out
 end
@@ -81,6 +91,11 @@ end
 function complete_signature(pats::Vector{Core.TypeName}, ref::Core.TypeName)
     if ref in pats
         return true
+    end
+    for pat in pats 
+        if ref.wrapper <: pat.wrapper
+            return true 
+        end
     end
     names = cstr_namesof(ref)
     if length(names) == 0 
@@ -106,6 +121,7 @@ end
 getname(t::Type{T}, ref) where T = [unfold(t).name]
 getname(t::DataType, ref) = [t.name]
 getname(t::Union, ref) = [getname(t.a, ref); getname(t.b, ref)]
+getname(t::Core.TypeofVararg, ref) = getname(t.T, ref)
 getname(r, ref) = []
 
 arity(t::Core.TypeName) = 0 # length(unfold(t.wrapper).parameters)
@@ -130,24 +146,27 @@ struct Wild end
 function filter_pats(pats::Vector{X}, ts::Vector{<:Any}) where X<:Vector{<:Any}
     out = X[]
     for pat in pats 
-        if isempty(pat) || (all(map((t, p) -> !(t isa Core.TypeofVararg || p isa Core.TypeofVararg) && (unvar(p) <: t || t <: unvar(p)), ts, pat)) && length(pat) == length(ts))
+        if isempty(pat) || (all(map((t, p) -> (p isa Core.TypeofVararg && (unvar(t) <: p.T || p.T <: unvar(t))) || (!(p isa Core.TypeofVararg) && (unvar(p) <: t || t <: unvar(p))), ts, pat)) && length(pat) == length(ts))
             push!(out, pat)
         end
     end
     return out
 end
 function inexhaustive(pats::Vector{<:Vector{<:Any}}, ts::Vector{<:Any}, len)
-    pats = filter_pats(pats, ts)
-    println("after filtering $pats against $ts with $len")
-    if len != length(ts)
-        if any(t -> t isa Core.TypeofVararg, ts) return false end
-    end
     if len == 0
+        println("len is 0")
         if length(pats) == 0
+            println("pats are 0")
             return []
         else 
             return nothing 
         end
+    end
+    println("before filtering $pats against $ts with $len")
+    pats = filter_pats(pats, ts)
+    println("after filtering $pats against $ts with $len")
+    if len != length(ts)
+        if any(t -> t isa Core.TypeofVararg, ts) return false end
     end
     if first(ts) isa Core.TypeofVararg
         return nothing 
@@ -156,8 +175,12 @@ function inexhaustive(pats::Vector{<:Vector{<:Any}}, ts::Vector{<:Any}, len)
     fsttyname = fstty.name
     firstnames = convert(Vector{Core.TypeName}, vcat(getname.(unfold.(first.(pats)), (fstty, ))...))
     if complete_signature(firstnames, fstty)
+        println("is complete firstnames $firstnames")
         for fn in firstnames
-            if isnothing(find_instance_of_super(fn.wrapper, fsttyname)) continue end
+            if isnothing(find_instance_of_super(fstty, fn)) 
+                println("could not find instance of $(fn.wrapper) from $fsttyname")
+                continue 
+            end
             nairty = arity(fn)
             res = inexhaustive(specialize_matrix(pats, fn), specialize_types(ts, fn), nairty + len - 1) 
             if !isnothing(res)

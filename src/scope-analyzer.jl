@@ -67,7 +67,7 @@ function resolve_import(l::TypecheckContext, path::Path, scope::ScopeInfo, curre
     return IncludeFile(fullpath, root_entity)
 end
 
-make_error(ctx::TypecheckContext, node) = ctx.ledger[ctx.node_mapping[node]] = TypeError()
+make_error(ctx::TypecheckContext, node) = ctx.ledger[ctx.node_mapping[node]] = TypeError("")
 analyze_scope(l::TypecheckContext, path, scope::ScopeInfo, expr::SemanticAST.ToplevelStmts) = @match expr begin 
     ToplevelStmt(exprs, _) => analyze_scope.((l, ), (path, ), (scope, ), exprs)
     ModuleStmt(std_imports, name, body, _) && m => analyze_module!(l, scope, m, path)
@@ -77,7 +77,7 @@ analyze_scope(l::TypecheckContext, path, scope::ScopeInfo, expr::SemanticAST.Top
             if !isnothing(imported)
                 l.ledger[l.node_mapping[expr]] = imported
             else
-                l.ledger[l.node_mapping[expr]] = TypeError() 
+                l.ledger[l.node_mapping[expr]] = TypeError("") 
             end
         end
     _ => nothing # println(expr)
