@@ -1,5 +1,5 @@
 using JuliaTypechecker, JuliaSyntax, Overseer, SymbolServer
-using MLStyle
+using MLStyle, Random
 using SemanticAST
 import SemanticAST: just_argslist, flatten_where_expr, analyze_typevar, ASTException, ASTNode
 import JuliaTypechecker: Binding, Path, PathInfo, analyze_scope, ModuleDefinition, IncludeFiles, TypeError, get_definition, get_definition_descending, analyze_bindings, ScopeInfo, InFile, Definition, ToplevelContext
@@ -494,6 +494,7 @@ end)
 	@test check_string("fn(;x=3)") == JuliaTypechecker.BasicType(Int64)
 	@test check_string("1 < 2 < 3") == JuliaTypechecker.BasicType(Bool)
 	@test check_string("begin foo = (bar = 3.0)/2.0; bar end") == JuliaTypechecker.BasicType(Float64)
+	@test check_string("Float64(2)") == JuliaTypechecker.BasicType(Float64)
 	#@test check_string(exponent) == JuliaTypechecker.BasicType(Function)
 end
 =#
@@ -539,14 +540,14 @@ end
 	ssi = SymbolServerInstance(".", nothing)
 	ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
 
-	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/math.jl", String)), ExpandCtx(true, false))
+	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/extracted.jl", String), filename="examples/extracted.jl"), ExpandCtx(true, false))
 	JuliaTypechecker.to_entities(ctx, entry, nothing)
 
 	root = m[ctx.node_mapping[entry]]
 	
 	toplevel_scope = ScopeInfo([:Base], root, nothing, [])
 	m[ctx.node_mapping[entry]] = toplevel_scope
-	m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("examples/math.jl")
+	m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("examples/extracted.jl")
 	
 	analyze_scope(ctx, [:Base], toplevel_scope, entry)
 	funcs = []
@@ -555,7 +556,6 @@ end
 		JuliaTypechecker.typecheck(ctx, root_node)
 		get_toplevel_functions(entry, funcs)
 	end
-	throw(length(funcs))
 	JuliaTypechecker.typecheck(ctx, entry)
 
 	cs = components(m, JuliaTypechecker.TypeError)
@@ -585,5 +585,37 @@ end
 		println(tlf)
 	end
 
+	#=
+	with_errors = Set(funcs)
+	for tlf in tlfs 
+		delete!(with_errors, tlf)
+	end
+
+	with_errors_list = collect(with_errors)
+	Random.shuffle!(with_errors_list)
+	for exfunc in with_errors_list[1:10]
+		basenode = exfunc.location.basenode
+		line, col = JuliaSyntax.source_location(basenode.source, basenode.position)
+		linecol = "$line:$col"
+		filename = basenode.source.filename
+		println("check $filename $linecol")
+	end
+
+	ninvs_anyargs = 0
+	ninvs_nonanyargs = 0
+	ninvs_anyrt = 0
+	for dent in @entities_in(m[JuliaTypechecker.Dispatch])
+		dres = m[dent][JuliaTypechecker.Dispatch]
+		if all(x->x != Any, dres.argtypes)
+			ninvs_nonanyargs += 1
+			if dres.returns == Any 
+				ninvs_anyrt += 1
+			end
+		else 
+			ninvs_anyargs += 1
+		end
+	end
+	println("any invocations: $ninvs_anyargs non-any functions: $ninvs_nonanyargs returning $ninvs_anyrt")
+	=#
 	@test false
 end

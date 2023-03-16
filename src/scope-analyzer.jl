@@ -50,7 +50,7 @@ function resolve_import(l::TypecheckContext, path::Path, scope::ScopeInfo, curre
     if !has_file(l.file_resolver, current_file, filename)
         return nothing
     end
-    expr = JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, load_file(l.file_resolver, current_file, filename))
+    expr = JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, load_file(l.file_resolver, current_file, filename), filename=filename)
     ast = expand_toplevel(expr, ExpandCtx(true, false))
     to_entities(l, ast, nothing)
     

@@ -7,6 +7,7 @@ version = "0.1.0"
 JuliaSyntax = "70703baa-626e-46a2-a12c-08ffd08c73b4"
 MLStyle = "d8e11817-5142-5d16-987a-aa16d5891078"
 Overseer = "1ada24be-c16d-4464-9f61-27c2e0f16645"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SemanticAST = "c5775199-6b5c-47be-a5a7-a37436caf489"
 SymbolServer = "cf896787-08d5-524d-9de7-132aaa0cb996"
 

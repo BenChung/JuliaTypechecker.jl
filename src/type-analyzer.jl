@@ -310,14 +310,21 @@ get_variable(lctx::LocalContext, var::Symbol) = lctx.variables[var]
 
 dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), fn::TypeVar, args) = dispatch_typed_direct(ctx, loc, fn.ub, args)
 dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), un::Union, args) = typemeet(dispatch_typed_direct(ctx, loc, un.a, args), dispatch_typed_direct(ctx, loc, un.b, args))
+
+
+@component struct Dispatch 
+	argtypes::Vector{Any}
+	returns::Any
+end
 function dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), (@nospecialize fn::Union{Function,DataType, Type{T} where T}), (@nospecialize canonical_args))
-    #println(args)
+    #println("dispatching onto $fn with args $canonical_args")
 	rt = Any
     world = ccall(:jl_get_tls_world_age, UInt, ())
     interp = Core.Compiler.NativeInterpreter(world)
     if fn isa Core.IntrinsicFunction
         throw(IntrinsicPassedException(fn))
     elseif fn <: Core.Builtin # we can be assured it exists?
+		#println("is builtin")
 		if !isdefined(fn, :instance)
 			println("Not defined instance $fn")
 		end
@@ -337,6 +344,7 @@ function dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), 
     argtuple = Tuple{fn,canonical_args...}
     #@debug ("Fetching method $fn_rec with signature $(canonical_args) with fn $fn fnty $(typeof(fn))")
     directly_callable = Base._methods_by_ftype(Tuple{fn_rec,canonical_args...}, -1, typemax(UInt64))
+	#println("callables: $directly_callable")
     if length(directly_callable) > 0 # there is a method that we can
         has_candidate = false
         rt = Union{}
@@ -351,6 +359,7 @@ function dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), 
 			end
         end
         if has_candidate
+			ctx.octx.ledger[ctx.octx.node_mapping[loc]] = Dispatch(canonical_args, rt)
             return BasicType(rt)
         end
         # todo: check if there's an interface declared for this type
@@ -455,9 +464,11 @@ function typecheck_fn_call(ictx::LocalContext, (@nospecialize inv::ASTNode), rec
 		res = dispatch_typed_direct(ictx, inv, typeof(func), Any[ntty; rectyp.type; canonize.(pos_args)])
 		return (ictx, res)
 	else 
+		#println("making a function call onto $rectyp")
 		if rectyp isa SpecialFunction
 			res = dispatch_intrinsic(rectyp.fn, Any[canonize(arg) for arg in pos_args])
 		else
+			#println("not a special function")
 			res = dispatch_typed_direct(ictx, inv, canonize(rectyp), canonize.(pos_args))
 		end
 		return (ictx, res)
@@ -480,6 +491,7 @@ jlmeet(restys::Vector{JlType}) = BasicType(reduce(Base.typejoin, canonize.(resty
 function typecheck_conditional(lctx::LocalContext, (@nospecialize cond::Expression))
 	(lctx, condty) = typecheck_expression(lctx, cond)
 	if !assignable(condty, BasicType(Bool)) && !assignable(condty, BasicType(Union{})) # we accept bottom to handle program flow control in conditionals
+		println("failure from $cond")
 		make_error(lctx.octx, cond, "Cannot use a nonboolean $condty in a conditional context")
 	end
 	return lctx
@@ -676,7 +688,9 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 		NCat(type::Union{Expression, Nothing}, dim::Int, rows::Vector{Union{NRow, Expression}}, _) => throw("not implemented")
 		Generator(flatten::Bool, expr::Expression, iterators::Vector{Iterspec}, _) => throw("not implemented")
 		Comprehension(type::Union{Expression, Nothing}, gen::Generator, _) => throw("not implemented")
-		Quote(ast::JuliaSyntax.SyntaxNode, _) => (lctx, BasicType(Expr)) # todo
+		Quote(ast::JuliaSyntax.SyntaxNode, _) => begin 
+			JuliaSyntax.kind(JuliaSyntax.head(ast)) == JuliaSyntax.K"quote" && typeof(JuliaSyntax.Expr(JuliaSyntax.child(ast, 1))) == Symbol ? (lctx, BasicType(Symbol)) : (lctx, BasicType(Expr)) # todo
+		end
 		MacroExpansion(value::Any, _) => throw("not implemented")
 		Ternary(cond::Expression, then::Expression, els::Expression, _) => begin
 			restys = JlType[]
