@@ -10,34 +10,34 @@ module prj
 	const nxnu = nx+nu
 	const N = copy(prb.N)
 
-	function project_Kdual!(w,κK)
+	function project_Kdual!(w::Vector{Float64},κK::Vector{Float64})
 		κK .= w[nx*(N-1)+1:end]
 		w[nx*(N-1)+1:end] .= max.(κK,0.0)
 	end
-	function project_Kdual(w,κK)
+	function project_Kdual(w::Vector{Float64},κK::Vector{Float64})
 		ww = deepcopy(w)
 		project_Kdual!(ww,κK)
 		return ww
 	end
-	function project_K!(w,κK)
+	function project_K!(w::Vector{Float64},κK::Vector{Float64})
 		w[1:nx*(N-1)] .= 0.0
 		κK .= w[nx*(N-1)+1:end]
 		w[nx*(N-1)+1:end] .= max.(κK,0.0)		 
 	end
-	function project_K(w,κK)
+	function project_K(w::Vector{Float64},κK::Vector{Float64})
 		ww = deepcopy(w)
 		project_K!(ww,κK)
 		return ww
 	end
-	function project_Kpolar!(w,κK)
+	function project_Kpolar!(w::Vector{Float64},κK::Vector{Float64})
 		w .= w .- project_K(w,κK)
 	end
-	function project_Kpolar(w,κK)
+	function project_Kpolar(w::Vector{Float64},κK::Vector{Float64})
 		ww = deepcopy(w)
 		project_Kpolar!(ww,κK)
 		return ww
 	end
-	function project_Z!(z,u,x)
+	function project_Z!(z::Vector{Float64},u::Vector{Float64},x::Vector{Float64})
 		for j = 1:N-1
 			u .= z[(j-1)*nxnu+1:(j-1)*nxnu+nu]
 			asm.project_U!(u)
@@ -48,7 +48,7 @@ module prj
 			z[(j-1)*nxnu+nu+1:nu+(j-1)*nxnu+nx] .= x
 		end
 	end
-	function project_Z(z,u,x)
+	function project_Z(z::Vector{Float64},u::Vector{Float64},x::Vector{Float64})
 		zz = deepcopy(z)
 		project_Z!(zz,u,x)
 		return zz 
@@ -64,7 +64,7 @@ module jump
 	
 	using ..prb
 	using ..asm
-	using JuMP, MosekTools, ECOS, Gurobi, COSMO, SCS
+	using JuMP, ECOS
 	using LinearAlgebra
 
 	# useful constants
@@ -78,131 +78,94 @@ module jump
 	z = randn(nxnu*(N-1))
 	z_xu = randn(nxnu*(N-1))
 
-	function solver_proxy!(z,slvr=:ecos,verbosity=true)
-		if slvr == :ecos
+	function solver_proxy!(z::Vector{Float64},slvr::Symbol=:ecos,verbosity::Bool=true)
+		#if slvr == :ecos
 			model= Model(ECOS.Optimizer)
 			set_optimizer_attribute(model,"printlevel",0)
 			set_optimizer_attribute(model,"feastol",prb.ϵ_pd)
 			set_optimizer_attribute(model,"abstol",prb.ϵ_gap)
 			set_optimizer_attribute(model,"reltol",prb.ϵ_gap)
-		elseif slvr == :gurobi
-			model= Model(Gurobi.Optimizer)
-			set_optimizer_attribute(model,"Presolve",0)
-			set_optimizer_attribute(model,"FeasibilityTol",prb.ϵ_pd)
-			set_optimizer_attribute(model,"OptimalityTol",prb.ϵ_pd)
-			set_optimizer_attribute(model,"BarConvTol",prb.ϵ_gap)
-			set_optimizer_attribute(model,"BarQCPConvTol",prb.ϵ_gap)
-		elseif slvr == :mosek
-			model= Model(Mosek.Optimizer)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_DFEAS",prb.ϵ_pd)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_PFEAS",prb.ϵ_pd)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_REL_GAP",prb.ϵ_gap)
-		elseif slvr == :cosmo
-			model= Model(COSMO.Optimizer)
-			set_optimizer_attribute(model,"eps_abs",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_rel",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_prim_inf",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_dual_inf",prb.ϵ_pd)
-		elseif slvr == :scs
-			model= Model(SCS.Optimizer)
-			set_optimizer_attribute(model,"eps",prb.ϵ_pd)
-		else
-			error("Invalid solver choice for JuMP.")
-		end
+		#else
+		#	error("Invalid solver choice for JuMP.")
+		#end
 		if ~verbosity
 			set_silent(model)
 		end
 
-		@variable(model,zz[1:nxnu*(N-1)])
-		
+		#tc: @variable(model,zz[1:nxnu*(N-1)])β1
+		zz = nothing::Vector{JuMP.VariableRef}
 		asm.set_constraint_jump_vectorized!(model,zz)
 
 		# dynamics
-		@constraint(model,asm.H[1:nx*(N-1),1:end]*zz .- asm.g[1:nx*(N-1)] .== 0)
+		#tc: @constraint(model,asm.H[1:nx*(N-1),1:end]*zz .- asm.g[1:nx*(N-1)] .== 0)
 
 		# affine inequality constraints
-		@constraint(model,asm.H[nx*(N-1)+1:end,1:end]*zz .- asm.g[nx*(N-1)+1:end] .≥ 0)
+		#tc: @constraint(model,asm.H[nx*(N-1)+1:end,1:end]*zz .- asm.g[nx*(N-1)+1:end] .≥ 0)
 
 		# cost function
-		@objective(model,Min,0.5 * sum(zz .* (asm.G*zz)) + asm.h⋅zz)
+		#tc: @objective(model,Min,0.5 * sum(zz .* (asm.G*zz)) + asm.h⋅zz)
 
 		optimize!(model)
 
 		exit_status = string(termination_status(model))
 		print("$(string(slvr)) termination status: $(exit_status)\n")
-		@assert (exit_status ∈ ("OPTIMAL","SLOW_PROGRESS","ALMOST_OPTIMAL")) "Problem not solved correctly."
+		#tc: @assert (exit_status ∈ ("OPTIMAL","SLOW_PROGRESS","ALMOST_OPTIMAL")) "Problem not solved correctly."
 
 		z .= value.(zz)[1:end]
 	end
 
-	solver!(solver_name=:ecos,verbosity=true) = solver_proxy!(z,solver_name,verbosity)
+	solver!(solver_name::Symbol=:ecos,verbosity::Bool=true) = solver_proxy!(z,solver_name,verbosity)
 
-	function solver_xu_proxy!(z,slvr=:ecos,verbosity=true)
-		if slvr == :ecos
+	function solver_xu_proxy!(z::Vector{Float64},slvr::Symbol=:ecos,verbosity::Bool=true)
+		#if slvr == :ecos
 			model= Model(ECOS.Optimizer)
 			set_optimizer_attribute(model,"printlevel",0)
 			set_optimizer_attribute(model,"feastol",prb.ϵ_pd)
 			set_optimizer_attribute(model,"abstol",prb.ϵ_gap)
 			set_optimizer_attribute(model,"reltol",prb.ϵ_gap)
-		elseif slvr == :gurobi
-			model= Model(Gurobi.Optimizer)
-			set_optimizer_attribute(model,"Presolve",0)
-			set_optimizer_attribute(model,"FeasibilityTol",prb.ϵ_pd)
-			set_optimizer_attribute(model,"OptimalityTol",prb.ϵ_pd)
-			set_optimizer_attribute(model,"BarConvTol",prb.ϵ_gap)
-			set_optimizer_attribute(model,"BarQCPConvTol",prb.ϵ_gap)
-		elseif slvr == :mosek
-			model= Model(Mosek.Optimizer)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_DFEAS",prb.ϵ_pd)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_PFEAS",prb.ϵ_pd)
-			set_optimizer_attribute(model,"INTPNT_CO_TOL_REL_GAP",prb.ϵ_gap)
-		elseif slvr == :cosmo
-			model= Model(COSMO.Optimizer)
-			set_optimizer_attribute(model,"eps_abs",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_rel",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_prim_inf",prb.ϵ_pd)
-			set_optimizer_attribute(model,"eps_dual_inf",prb.ϵ_pd)
-		elseif slvr == :scs
-			model= Model(SCS.Optimizer)
-			set_optimizer_attribute(model,"eps",prb.ϵ_pd)
-		else
-			error("Invalid solver choice for JuMP.")
-		end
+		#else
+		#	error("Invalid solver choice for JuMP.")
+		#end
 		if ~verbosity
 			set_silent(model)
 		end
 
-		@variable(model,x[1:nx,1:N])
-		@variable(model,u[1:nu,1:N-1])
-		@variable(model,β1[1:N-1] ≥ 0)        			# aux variable for defining objective
-		@variable(model,β2[1:N-1] ≥ 0)					# aux variable for defining objective
+		#tc: @variable(model,x[1:nx,1:N])
+		x = nothing::Vector{JuMP.VariableRef}
+		#tc: @variable(model,u[1:nu,1:N-1])
+		u = nothing::Vector{JuMP.VariableRef}
+		#tc: @variable(model,β1[1:N-1] ≥ 0)        			# aux variable for defining objective
+		β1 = nothing::Vector{JuMP.VariableRef}
+		#tc: @variable(model,β2[1:N-1] ≥ 0)					# aux variable for defining objective
+		β2 = nothing::Vector{JuMP.VariableRef}
+
 
 		# dynamics constraint
 		Inx = Array(Diagonal(ones(nx)))
-		@constraint(model,[t=1:N-1],[Inx -prb.A[t] -prb.B[t] -Inx]*cat(x[:,t+1],x[:,t],u[:,t],prb.e[t],dims=1) .== 0)
+		#tc: @constraint(model,[t=1:N-1],[Inx -prb.A[t] -prb.B[t] -Inx]*cat(x[:,t+1],x[:,t],u[:,t],prb.e[t],dims=1) .== 0)
 
 		# initial condition
-		@constraint(model,x[:,1] .== prb.x0)
+		#tc: @constraint(model,x[:,1] .== prb.x0)
 
 		# set problem constraints
 		asm.set_constraint_jump_decomposed!(model,x,u) 
 
 		# define objective terms
-		@constraint(model,[t=1:N-1],[β1[t],(sqrt(prb.R[t])*(u[:,t] .- prb.uref[t]))...] in SecondOrderCone())
-		@constraint(model,[t=1:N-1],[β2[t],(sqrt(prb.Q[t])*(x[:,t+1] .- prb.xref[t]))...] in SecondOrderCone())
+		#tc: @constraint(model,[t=1:N-1],[β1[t],(sqrt(prb.R[t])*(u[:,t] .- prb.uref[t]))...] in SecondOrderCone())
+		#tc: @constraint(model,[t=1:N-1],[β2[t],(sqrt(prb.Q[t])*(x[:,t+1] .- prb.xref[t]))...] in SecondOrderCone())
 
-		@objective(model,Min,0.5*sum(β1 .^ 2) + 0.5*sum(β2 .^ 2))
+		#tc: @objective(model,Min,0.5*sum(β1 .^ 2) + 0.5*sum(β2 .^ 2))
 
 		optimize!(model)
 
 		exit_status = string(termination_status(model))
 		print("$(string(slvr)) termination status: $(exit_status)\n")
-		@assert (exit_status ∈ ("OPTIMAL","SLOW_PROGRESS","ALMOST_OPTIMAL")) "Problem not solved correctly."
+		#tc: @assert (exit_status ∈ ("OPTIMAL","SLOW_PROGRESS","ALMOST_OPTIMAL")) "Problem not solved correctly."
 
 		z .= cat([cat(value.(u)[:,t],value.(x)[:,t+1],dims=1) for t=1:N-1]...,dims=1)
 	end
 
-	solver_xu!(solver_name=:ecos,verbosity=true) = solver_xu_proxy!(z_xu,solver_name,verbosity)
+	solver_xu!(solver_name::Symbol=:ecos,verbosity::Bool=true) = solver_xu_proxy!(z_xu,solver_name,verbosity)
 
 	compute_nrm_z() = norm(z)^2
 	compute_fopt() = 0.5 * sum(z .* (asm.G*z)) + asm.h⋅z
@@ -218,7 +181,7 @@ module pipg
 	using ..asm									# assembly of auxiliary parameters
 	using ..jump
 	using LinearAlgebra, StaticArrays, Plots
-	pgfplotsx()
+	# tc: reduce dependencies pgfplotsx()
 
 	# useful constants
 	const nx = copy(prb.nx)
@@ -258,11 +221,11 @@ module pipg
 
 	# temporary variables
 	κK = randn(nH) 
-	const κx = MVector{nx}(randn(nx))
-	const κu = MVector{nu}(randn(nu))
+	const κx = (randn(nx)) #tc: MVector{nx}
+	const κu = (randn(nu)) #tc: MVector{nu}
 
 	# pipg+ solver (version 1)
-	function solver_v1_proxy!(z,v,w,κK,κu,κx,rd2o,rd2K,rfval,restart_idx=prb.kmax)
+	function solver_v1_proxy!(z::Vector{Float64},v::Vector{Float64},w::Vector{Float64},κK::Vector{Float64},κu::Vector{Float64},κx::Vector{Float64},rd2o::Vector{Float64},rd2K::Vector{Float64},rfval::Vector{Float64},restart_idx::Int=prb.kmax)
 
 		for k = 1:prb.kmax
 			# βᵏ = (k+1)*μb2σ
@@ -299,7 +262,7 @@ module pipg
 	end
 
 	# pipg+ solver
-	function solver_proxy!(z,v,w,κK,κu,κx,rd2o,rd2K,rfval,restart_idx=prb.kmax)
+	function solver_proxy!(z::Vector{Float64},v::Vector{Float64},w::Vector{Float64},κK::Vector{Float64},κu::Vector{Float64},κx::Vector{Float64},rd2o::Vector{Float64},rd2K::Vector{Float64},rfval::Vector{Float64},restart_idx::Int=prb.kmax)
 
 		zkm1 = randn(length(z))
 		for k = 1:prb.kmax
@@ -336,10 +299,10 @@ module pipg
 
 	end
 
-	solver!(restart_idx=prb.kmax) = solver_proxy!(z,v,w,κK,κu,κx,rd2o,rd2K,rfval,restart_idx)
+	solver!(restart_idx::Int=prb.kmax) = solver_proxy!(z,v,w,κK,κu,κx,rd2o,rd2K,rfval,restart_idx)
 
 	# pipg solver (non-strongly convex formulation; affine equality constraint replaces the affine conic constraint)
-	function solver_eq_proxy!(z,y,v,w,κK,κu,κx,rd2o,rd2K,rfval)
+	function solver_eq_proxy!(z::Vector{Float64},y::Vector{Float64},v::Vector{Float64},w::Vector{Float64},κK::Vector{Float64},κu::Vector{Float64},κx::Vector{Float64},rd2o::Vector{Float64},rd2K::Vector{Float64},rfval::Vector{Float64})
 		β = 2.0
 		α = 1/(β*asm.σ_eq+asm.λ)
 		for k = 1:prb.kmax
@@ -382,11 +345,11 @@ module pipg
 			plot!(1:prb.kmax,rd2K_restrt,line=:solid,color=:red,lab="PIPG restarted",lw=1.1,yaxis=:log)
 			plot!(1:prb.kmax,rd2K_eq,line=:solid,color=:purple,lab="PIPGeq",lw=1.1,yaxis=:log)
 			plot!(size=(400,500))
-			λ = @layout [a b c]
-			display(plot(plt_d2o,plt_fval,plt_feas,layout=λ,size=(4*1200/5,4*500/5)))
+			#tc: λ = @layout [a b c]
+			#tc: display(plot(plt_d2o,plt_fval,plt_feas,layout=λ,size=(4*1200/5,4*500/5)))
 	end
 
-	function reset_var!(flg=:both)
+	function reset_var!(flg::Symbol=:both)
 		if flg == :plus
 			z .= randn(nxnu*(N-1))
 			v .= randn(nx*(N-1)+nH)
@@ -419,9 +382,9 @@ module rival
 	using ..prj
 	using ..asm									# assembly of auxiliary parameters
 	using ..jump
-	using LinearAlgebra, StaticArrays, Plots, LaTeXStrings
-	gr()
-	default(xtickfontsize=11,ytickfontsize=11,ztickfontsize=11,legendfontsize=9,labelfontsize=11)
+	using LinearAlgebra, StaticArrays
+	#gr()
+	#default(xtickfontsize=11,ytickfontsize=11,ztickfontsize=11,legendfontsize=9,labelfontsize=11)
 
 	# useful constants
 	const nx = copy(prb.nx)
@@ -444,17 +407,17 @@ module rival
 	rd2K = randn(prb.kmax)
 	rd2o = randn(prb.kmax)
 	rfval = randn(prb.kmax)
-	nest_iter_count = zeros(prb.kmax)
+	nest_iter_count = zeros(Int, prb.kmax)
 
 	# temporary variables
 	# temporary variables
 	κK = randn(nH) 
-	const κx = MVector{nx}(randn(nx))
-	const κu = MVector{nu}(randn(nu))
+	const κx = (randn(nx))
+	const κu = (randn(nu))
 	κz = randn(nxnu*(N-1))
 
 	# ADMM
-	function solver_admm_proxy!(z,x,y,v,w,κz,κK,κx,κu,rd2o,rd2K,rfval,nest_iter_count)
+	function solver_admm_proxy!(z::Vector{Float64},x::Vector{Float64},y::Vector{Float64},v::Vector{Float64},w::Vector{Float64},κz::Vector{Float64},κK::Vector{Float64},κx::Vector{Float64},κu::Vector{Float64},rd2o::Vector{Float64},rd2K::Vector{Float64},rfval::Vector{Float64},nest_iter_count::Vector{Int})
 		α = copy(prb.α_admm)
 		λ̃ = asm.λ + α*asm.σ
 		λ̃inv = 1/λ̃
@@ -474,7 +437,7 @@ module rival
 			while inner_term_crit ≥ prb.ϵ_nest_admm
 				v .= asm.H*x .- y .- asm.g .+ w
 
-				κz .= z 
+				κz::Vector{Float64} .= z 
 				z .= x .- λ̃inv .* (asm.G*x .+ asm.h .+ α .* asm.HT*v)
 				prj.project_Z!(z,κu,κx)	
 
@@ -498,7 +461,6 @@ module rival
 		end
 		print("ADMM relative distance to optimum: $(prj.compute_relerr(z,jump.z,nrm_z_jump))\n")
 	end
-
 	solver_admm!() = solver_admm_proxy!(z,x,y,v,w,κz,κK,κx,κu,rd2o,rd2K,rfval,nest_iter_count)
 
 	z_2 = randn(nxnu*(N-1))
@@ -511,7 +473,7 @@ module rival
 	rfval_2 = randn(prb.kmax)
 
 	# Chambolle and Pock variable step size
-	function solver_cp_proxy!(z,y,w,κK,κx,κu,rd2o,rd2K,rfval)
+	function solver_cp_proxy!(z::Vector{Float64},y::Vector{Float64},w::Vector{Float64},κK::Vector{Float64},κx::Vector{Float64},κu::Vector{Float64},rd2o::Vector{Float64},rd2K::Vector{Float64},rfval::Vector{Float64})
 
 	    βᵏ = prb.β⁰
 	    γᵏ = prb.γ⁰
@@ -561,7 +523,7 @@ module rival
 	end
 
 	using ..pipg
-
+#= tc: use of regex string macros
 	plot_solstat() = begin plt_d2o = plot(1:prb.kmax,pipg.rd2o,line=:solid,color=:magenta,title=L"\frac{\|z-z^{\star}\|_2^2}{\|z^{\star}\|_2^2}",lab="PIPG",lw=1.1,yaxis=:log,xlabel="Iterations") 
 			plot!(1:prb.kmax,pipg.rd2o_restrt,line=:solid,color=:red,lab="PIPG w/ restart",lw=1.1,yaxis=:log)
 			plot!(1:prb.kmax,pipg.rd2o_eq,line=:solid,color=:purple,lab="PIPGeq",lw=1.1,yaxis=:log)
@@ -586,8 +548,8 @@ module rival
 			plot!(1:prb.kmax,rd2K_2,line=:solid,color=:orange,lab="PDHG",lw=1.1,yaxis=:log)	
 			plot!(size=(400,500),legend=:topright,xlim=[1,prb.kmax],ylim=[1e-15,1e1])
 
-			λ = @layout [a b c ; d]
-			display(plot(plt_d2o,plt_rfval,plt_feas,plt_nest_iter,layout=λ,size=(4*1200/5,4*1000/5)))
+			#tc: λ = @layout [a b c ; d]
+			#tc: display(plot(plt_d2o,plt_rfval,plt_feas,plt_nest_iter,layout=λ,size=(4*1200/5,4*1000/5)))
 	end
-
+=#
 end

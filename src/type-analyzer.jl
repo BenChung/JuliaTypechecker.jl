@@ -90,6 +90,11 @@ convert_type_internal(ctx::LocalContext, src::TyVar, vars::Base.ImmutableDict{Sy
 			isnothing(src.lb) ? Union{} : convert_type_internal(ctx, src.lb, vars), 
 			isnothing(src.ub) ? Any : convert_type_internal(ctx, src.ub, vars))
 
+
+evaluate_type_src(ctx::LocalContext, src::Expression) = @match src begin 
+	GetProperty(src, name, _) => getproperty(evaluate_type_src(ctx, src), name)
+	Variable(sym, _) => lookup_type(ctx, sym, src)
+end
 function convert_type_internal(ctx::LocalContext, type::Expression, vars::Base.ImmutableDict{Symbol, TypeVar})
 	return @match type begin 
 		Quote(_, _) => begin make_error(ctx.octx, type, "Static checking does not support quotations in types"); Any end
@@ -106,7 +111,8 @@ function convert_type_internal(ctx::LocalContext, type::Expression, vars::Base.I
 			else
 				convert_type_internal(ctx, e, vars) 
 			end
-		_ => begin make_error(ctx.octx, type, "Static checking does not support quotations in types"); Any end
+		GetProperty(src, name, _) && prop => evaluate_type_src(ctx, prop)
+		other => begin make_error(ctx.octx, type, "Unrecognized form in type $other"); Any end
 	end
 end
 
@@ -146,6 +152,7 @@ itertype(over::BasicType) = BasicType(eltype(over.type))
 # a named tuple assignment extracts the values at the names (effectively like getproperty) in one go
 # (;x,y) = foo is like going x = foo.x; y = foo.y
 function extract_named_tuple_bindings(ctx::LocalContext, params::Vector{Union{IdentifierAssignment, TypedAssignment}}, type)
+	if isnothing(type) return [] end
 	param_names = []
 	existing_names = fieldnames(canonize(type)) 
 	function check_name(param::IdentifierAssignment, id::Symbol)
@@ -236,7 +243,6 @@ typecheck_lvalue(ctx::LocalContext, binding::LValue, (@nospecialize type::Union{
 		end
 	FunctionAssignment(name::FunctionName, args_stmts::Vector{FnArg}, kwargs_stmts::Vector{KwArg}, sparams::Vector{TyVar}, rett::Union{Expression, Nothing}, _) => 
 		throw("inline functions not supported yet")
-	BroadcastAssignment(lhs::LValue, _) => throw("broadcasting not supported yet")
     UnionAllAssignment(name::LValue, tyargs::Vector{TyVar}, _) => throw("Type aliasing not supported yet")
 end
 
@@ -503,6 +509,20 @@ function add_end_token(ictx::LocalContext, arrty::JlType)
 	return rctx 
 end
 
+typecheck_iterator(ctx::LocalContext, i::Iterspec) = @match i begin 
+	IterEq(lhs::LValue, rhs::Expression, _) => begin 
+		ictx, iterty = typecheck_expression(ctx, rhs)
+		bind_argument(ictx, lhs, itertype(iterty))
+	end
+	Filter(inner::Vector{Iterspec}, cond::Expression, _) => begin 
+		for inner_iter in inner 
+			ctx = typecheck_iterator(ctx, inner_iter)
+		end
+		typecheck_conditional(ctx, cond)
+	end
+end
+
+
 function typecheck_expression(lctx::LocalContext, expr::Expression)
 	@match expr begin 
 		Literal(expr::Any, _) => (lctx, literal_typeof(expr))
@@ -559,9 +579,18 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 			ictx = typecheck_conditional(ictx, r)
 			return (lctx, BasicType(Bool))
 		end
+		FunCall(SemanticAST.Broadcast(op::Expression, _), pos_args::Vector{PositionalArgs}, kw_args::Vector{Union{KeywordArg, SplatArg}}, _)&&fn => begin 
+			(ictx, rectyp) = typecheck_expression(lctx, op)
+			(ictx, argtyps, kwtyps) = typecheck_fn_arguments(ictx, pos_args, kw_args)
+			return typecheck_fn_call(ictx, fn, BasicType(typeof(Base.broadcast)), [rectyp; argtyps], kwtyps)
+		end
+		SemanticAST.BroadcastAssignment(lhs::Expression, rhs::Expression, _)&&assignment => begin
+			(ictx, ltyp) = typecheck_expression(lctx, lhs)
+			(ictx, rtyp) = typecheck_expression(ictx, rhs)
+			return typecheck_fn_call(ictx, assignment, BasicType(typeof(Base.broadcast!)), JlType[BasicType(typeof(Base.identity)); ltyp; rtyp], Pair{Symbol, JlType}[])
+		end
 		FunCall(receiver::Expression, pos_args::Vector{PositionalArgs}, kw_args::Vector{Union{KeywordArg, SplatArg}}, _)&&fn => begin 
 			println("calling $fn")
-
 			typecheck_fn_call(lctx, fn, receiver, pos_args, kw_args)
 		end
 		GetIndex(arr::Expression, arguments::Vector{PositionalArgs}, _) => begin 
@@ -585,21 +614,22 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 			ictx, argty = typecheck_expression(lctx, rhs)
 			(bind_argument(ictx, lhs, argty), argty)
 		end
-		Update(op::Symbol, lhs::LValue, rhs::Expression, dotted::Bool, _) => begin 
-			(ictx, rty) = typecheck_expression(lctx, rhs)
-			(ictx, lty, _) = typecheck_lvalue(ictx, lhs, rty)
-			if dotted 
-				throw("Broadcasting not supported yet!")
-			else
-				if isnothing(lty) || isnothing(rty)
-					println("nothing returned")
-					println("lty: $lty")
-					println("rty: $rty")
-					println("left expression: $lhs")
-					println("right expression: $rhs")
-				end
-				return typecheck_fn_call(ictx, expr, lookup_variable_type(ictx, Symbol(string(op)[1:end-1]), expr), JlType[lty, rty], Pair{Symbol, JlType}[])
+		Update(op::Symbol, lhs::LValue, rhs::Expression, _) => begin 
+			(ictx, lty, _) = typecheck_lvalue(lctx, lhs, nothing)
+			(ictx, rty) = typecheck_expression(ictx, rhs)
+			if isnothing(lty) || isnothing(rty)
+				println("nothing returned")
+				println("lty: $lty")
+				println("rty: $rty")
+				println("left expression: $lhs")
+				println("right expression: $rhs")
 			end
+			return typecheck_fn_call(ictx, expr, lookup_variable_type(ictx, Symbol(string(op)[1:end-1]), expr), JlType[lty, rty], Pair{Symbol, JlType}[])
+		end
+		SemanticAST.BroadcastUpdate(op::Symbol, lhs::Expression, rhs::Expression, _)&&assignment => begin
+			(ictx, ltyp) = typecheck_expression(lctx, lhs)
+			(ictx, rtyp) = typecheck_expression(ictx, rhs)
+			return typecheck_fn_call(ictx, assignment, BasicType(typeof(Base.broadcast!)), [lookup_variable_type(ictx, Symbol(string(op)[1:end-1]), expr); ltyp; ltyp; rtyp], kwtyps)
 		end
 		WhereType(type::Expression, vars::Vector{TyVar}, _) => throw("not implemented")
 		Declaration(vars::Vector{VarDecl}, _) => begin 
@@ -686,8 +716,28 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 		HCat(type::Union{Expression, Nothing}, elems::Vector{Union{Expression, Splat}}, _) => throw("not implemented")
 		VCat(type::Union{Expression, Nothing}, rows::Vector{Union{Row, Expression, Splat}}, _) => throw("not implemented")
 		NCat(type::Union{Expression, Nothing}, dim::Int, rows::Vector{Union{NRow, Expression}}, _) => throw("not implemented")
-		Generator(flatten::Bool, expr::Expression, iterators::Vector{Iterspec}, _) => throw("not implemented")
-		Comprehension(type::Union{Expression, Nothing}, gen::Generator, _) => throw("not implemented")
+		Generator(flatten::Bool, expr::Expression, iterators::Vector{Iterspec}, _) && gen => throw("Standalone generators are not currently supported; use a comprehension instead")
+		Comprehension(type::Union{Expression, Nothing}, gen::Generator, _)&&cmp => begin 
+			ictx = lctx
+			is_flat = gen.flatten || any(iter -> iter isa Filter, gen.iterators)
+			if is_flat 
+				dim = 1
+			else 
+				dim = length(gen.iterators)
+			end
+			for iter in gen.iterators 
+				ictx = typecheck_iterator(ictx, iter)
+			end
+			(_, elty) = typecheck_expression(ictx, gen.expr)
+			if !isnothing(type)
+				tgt_type = convert_type(lctx, type)
+				if !assignable(elty, tgt_type)
+					make_error(lctx.octx, gen.expr, "Comprehension body returns $(elty) while expecting $tgt_type.")
+				end
+				elty = tgt_type
+			end
+			(lctx, BasicType(Array{canonize(elty), dim}))
+		end
 		Quote(ast::JuliaSyntax.SyntaxNode, _) => begin 
 			JuliaSyntax.kind(JuliaSyntax.head(ast)) == JuliaSyntax.K"quote" && typeof(JuliaSyntax.Expr(JuliaSyntax.child(ast, 1))) == Symbol ? (lctx, BasicType(Symbol)) : (lctx, BasicType(Expr)) # todo
 		end

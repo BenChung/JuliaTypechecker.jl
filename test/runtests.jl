@@ -508,7 +508,7 @@ function walk_to_function(ctx::TypecheckContext, e)
 	end
 end
 function extract_errors(ctx::TypecheckContext, expr::SemanticAST.ToplevelStmts) 
-	function_errors = Dict{SemanticAST.ASTNode, Vector{JuliaTypechecker.TypeError}}()
+	function_errors = Dict{SemanticAST.ASTNode, Vector{Tuple{JuliaTypechecker.TypeError, ASTNode}}}()
 	if !(JuliaTypechecker.TypeError in ctx.ledger)
 		return function_errors
 	end
@@ -516,7 +516,7 @@ function extract_errors(ctx::TypecheckContext, expr::SemanticAST.ToplevelStmts)
 		function_node = walk_to_function(ctx, error_entity)
 		if isnothing(function_node) continue end
 		errors = get!(() -> JuliaTypechecker.TypeError[], function_errors, function_node)
-		push!(errors, ctx.ledger[JuliaTypechecker.TypeError][error_entity])
+		push!(errors, (ctx.ledger[JuliaTypechecker.TypeError][error_entity], ctx.ledger[JuliaTypechecker.ASTComponent][error_entity].node))
 	end
 	return function_errors
 end
@@ -532,6 +532,100 @@ function get_toplevel_functions(expr::SemanticAST.ToplevelStmts, funcs=[])
 	return funcs
 end
 	
+@testset "Load pipg" begin 
+	r = LiveFileSource()
+	stage = Stage(:typechecker, [])
+	m = Ledger(stage)
+	ssi = SymbolServerInstance(".", nothing)
+	ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+
+	include("examples/pipg/ex1_problem_data.jl")
+	include("examples/pipg/solver_suite.jl")
+	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/pipg/solver_suite.jl", String), filename="examples/pipg/solver_suite.jl"), ExpandCtx(true, false))
+	JuliaTypechecker.to_entities(ctx, entry, nothing)
+
+	root = m[ctx.node_mapping[entry]]
+	
+	toplevel_scope = ScopeInfo([:Main], root, nothing, [])
+	m[ctx.node_mapping[entry]] = toplevel_scope
+	m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("examples/pipg/solver_suite.jl")
+	
+	analyze_scope(ctx, [:Main], toplevel_scope, entry)
+	funcs = []
+	for file_root_entity in @entities_in(m[JuliaTypechecker.InFile])
+		root_node = m[JuliaTypechecker.ASTComponent][file_root_entity].node
+		JuliaTypechecker.typecheck(ctx, root_node)
+		get_toplevel_functions(entry, funcs)
+	end
+	JuliaTypechecker.typecheck(ctx, entry)
+
+	cs = components(m, JuliaTypechecker.TypeError)
+	if length((cs)) > 0
+		println("Found errors: $(length(first(cs)))")
+	end
+	fn_errors = extract_errors(ctx, entry)
+	
+	tlfs = Set(funcs)
+	
+	for fnerr in fn_errors 
+		fn, errs = fnerr 
+		delete!(tlfs, fn)
+		println("Errors found in function: ")
+		show(stdout, fn)
+		n =0
+		println("")
+		for err in errs 
+			println("err $n")
+			node = last(err)
+			basenode = node.location.basenode
+			line, col = JuliaSyntax.source_location(basenode.source, basenode.position)
+			linecol = "$line:$col"
+			filename = basenode.source.filename
+			println(first(err).msg)
+			println("at $line:$col in $filename")
+			println("")
+			n+=1
+		end
+	end
+	println("functions without errors:")
+	for tlf in tlfs 
+		println(tlf)
+	end
+
+	#=
+	with_errors = Set(funcs)
+	for tlf in tlfs 
+		delete!(with_errors, tlf)
+	end
+
+	with_errors_list = collect(with_errors)
+	Random.shuffle!(with_errors_list)
+	for exfunc in with_errors_list[1:10]
+		basenode = exfunc.location.basenode
+		line, col = JuliaSyntax.source_location(basenode.source, basenode.position)
+		linecol = "$line:$col"
+		filename = basenode.source.filename
+		println("check $filename $linecol")
+	end
+
+	ninvs_anyargs = 0
+	ninvs_nonanyargs = 0
+	ninvs_anyrt = 0
+	for dent in @entities_in(m[JuliaTypechecker.Dispatch])
+		dres = m[dent][JuliaTypechecker.Dispatch]
+		if all(x->x != Any, dres.argtypes)
+			ninvs_nonanyargs += 1
+			if dres.returns == Any 
+				ninvs_anyrt += 1
+			end
+		else 
+			ninvs_anyargs += 1
+		end
+	end
+	println("any invocations: $ninvs_anyargs non-any functions: $ninvs_nonanyargs returning $ninvs_anyrt")
+	=#
+	@test false
+end
 
 @testset "Load mathematics" begin 
 	r = LiveFileSource()
@@ -576,6 +670,7 @@ end
 		for err in errs 
 			println("err $n")
 			println(err.msg)
+			println("at $filename $linecol")
 			println("")
 			n+=1
 		end

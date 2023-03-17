@@ -2,7 +2,7 @@ module proj
 using LinearAlgebra
 # ! indicates that the variable is modified
 
-function infnorm(x,n,γ)
+function infnorm(x::Vector{Float64},n::Int,γ::Float64)
 # compute ∞-norm of x
 # ---
 # x : input vector 				(real n-vector)
@@ -16,7 +16,7 @@ function infnorm(x,n,γ)
 	return γ
 end
 
-function hlfspace!(x,z,u,ζ,n,β)
+function hlfspace!(x::Vector{Float64},z::Vector{Float64},u::Vector{Float64},ζ::Float64,n::Int,β::Float64)
 # projection onto halfspace { x | u⋅x ≤ ζ }
 # ---
 # x : projected result					(real n-vector) !
@@ -25,7 +25,7 @@ function hlfspace!(x,z,u,ζ,n,β)
 # ζ : scalar on RHS 					(real scalar)
 # β : temporary variable                (real scalar)   !
 
-	@assert BLAS.nrm2(n,u,1)≈1 "Normal vector u should have unit norm."
+	#tc: @assert BLAS.nrm2(n,u,1)≈1 "Normal vector u should have unit norm."
 
 	β = BLAS.dot(n,z,1,u,1) - ζ
 
@@ -38,7 +38,7 @@ function hlfspace!(x,z,u,ζ,n,β)
 
 end
 
-function hlfspace2!(x,z,u1,u2,ζ1,ζ2,n,β,α1,α2)
+function hlfspace2!(x::Vector{Float64},z::Vector{Float64},u1::Vector{Float64},u2::Vector{Float64},ζ1::Float64,ζ2::Float64,n::Int,β::Float64,α1::Float64,α2::Float64)
 # projection onto intersection of two halfspaces { x | u1⋅x ≤ ζ1 } ∩ { x | u2⋅x ≤ ζ2 }
 # ---
 # x  : projected result					(real n-vector) !
@@ -51,8 +51,8 @@ function hlfspace2!(x,z,u1,u2,ζ1,ζ2,n,β,α1,α2)
 # α1 : temporary variable               (real scalar)   !
 # α2 : temporary variable               (real scalar)   !
 
-	@assert BLAS.nrm2(n,u1,1)≈1 "Normal vector u1 should have unit norm." 
-	@assert BLAS.nrm2(n,u2,1)≈1 "Normal vector u2 should have unit norm." 
+	#tc: @assert BLAS.nrm2(n,u1,1)≈1 "Normal vector u1 should have unit norm." 
+	#tc: @assert BLAS.nrm2(n,u2,1)≈1 "Normal vector u2 should have unit norm." 
 
 	β = BLAS.dot(n,u1,1,u2,1)
 	α1 = BLAS.dot(n,z,1,u1,1)
@@ -67,7 +67,7 @@ function hlfspace2!(x,z,u1,u2,ζ1,ζ2,n,β,α1,α2)
 			BLAS.blascopy!(n,z,1,x,1)
 		end
 	elseif β ≈ -1
-		@assert ζ1+ζ2>0 "The two halfspaces do not intersect."
+		#tc: @assert ζ1+ζ2>0 "The two halfspaces do not intersect."
 		if α1 < -ζ2
 			BLAS.blascopy!(n,z,1,x,1)
 			axpy!(-α1-ζ2,u1,x)		
@@ -95,7 +95,7 @@ function hlfspace2!(x,z,u1,u2,ζ1,ζ2,n,β,α1,α2)
 
 end
 
-function box!(x,z,l,u,n)
+function box!(x::Vector{Float64},z::Vector{Float64},l::Float64,u::Float64,n::Int)
 # projection onto l∞-norm ball
 # ---
 # x : projected result			(real n-vector) !
@@ -104,7 +104,7 @@ function box!(x,z,l,u,n)
 # u : upper bound 				(real scalar)
 # n : length of z 				(integer)
 
-	@assert u>l "Upper bound should be greater than lower bound."
+	#tc: @assert u>l "Upper bound should be greater than lower bound."
 
 	for j = 1:n
 		x[j] = min(u,max(z[j],l))
@@ -112,7 +112,7 @@ function box!(x,z,l,u,n)
 
 end
 
-function ball!(x,z,r,n)
+function ball!(x::Vector{Float64},z::Vector{Float64},r::Float64,n::Int)
 # projection onto l2-norm ball
 # ---
 # x : projected result			(real n-vector) !
@@ -120,14 +120,14 @@ function ball!(x,z,r,n)
 # r : radius of l2-norm ball 	(real scalar)
 # n : length of z 				(integer)
 	
-	@assert r>0 "Radius should be positive."
+	#tc: @assert r>0 "Radius should be positive."
 
 	BLAS.blascopy!(n,z,1,x,1)
 	BLAS.scal!(n,r/max(BLAS.nrm2(n,x,1),r),x,1)
 
 end
 
-function soc!(x,z,α,n,β)
+function soc!(x::Vector{Float64},z::Vector{Float64},α::Float64,n::Int,β::Float64)
 # projection onto second-order cone (aka soc, ice-cream, lorentz cone) 
 # type 1 : cone axis along last coordinate and arctan(α) is the cone angle
 # ---
@@ -137,7 +137,7 @@ function soc!(x,z,α,n,β)
 # n : length of z (integer)		 (integer)	
 # β : temp storage variable  	 (real scalar)   !
 
-	@assert α>0 "Cone angle arctan(α) must be positive."
+	#tc: @assert α>0 "Cone angle arctan(α) must be positive."
 
 	β = BLAS.nrm2(n-1,z,1)
 
@@ -153,7 +153,7 @@ function soc!(x,z,α,n,β)
 
 end
 
-function soc2!(x,z,θ1,θ2,u,n,β,γ,κ)
+function soc2!(x::Vector{Float64},z::Vector{Float64},θ1::Float64,θ2::Float64,u::Vector{Float64},n::Int,β::Float64,γ::Float64,κ::Vector{Float64})
 # projection onto second-order cone (aka soc, ice-cream, lorentz cone) 
 # type 2 : cone axis along unit vector u and arccos(θ) is the cone angle
 # ---
@@ -167,8 +167,8 @@ function soc2!(x,z,θ1,θ2,u,n,β,γ,κ)
 # γ  : temp storage variable 		(real scalar)   !
 # κ  : temp storage variable 		(real n-vector) !
 
-	@assert min(θ1,1-θ1)>0 && min(θ2,1-θ2)>0 "θ1,θ2 ∈ [0,1]"
-	@assert BLAS.nrm2(n,u,1)≈1 "u must be a unit vector"
+	#tc: @assert min(θ1,1-θ1)>0 && min(θ2,1-θ2)>0 "θ1,θ2 ∈ [0,1]"
+	#tc: @assert BLAS.nrm2(n,u,1)≈1 "u must be a unit vector"
 
 	β = BLAS.nrm2(n,z,1)
 	γ = BLAS.dot(n,z,1,u,1)
@@ -187,7 +187,7 @@ function soc2!(x,z,θ1,θ2,u,n,β,γ,κ)
 
 end
 
-function soc_ball!(x,z,α,r,n,β)
+function soc_ball!(x::Vector{Float64},z::Vector{Float64},α::Float64,r::Float64,n::Int,β::Float64)
 # projection onto intersection of soc cone and l2-norm ball
 # ---
 # x : projected result 			(real n-vector) !
@@ -202,7 +202,7 @@ function soc_ball!(x,z,α,r,n,β)
 
 end
 
-function soc2_ball!(x,z,θ1,θ2,u,r,n,β,γ,κ)
+function soc2_ball!(x::Vector{Float64},z::Vector{Float64},θ1::Float64,θ2::Float64,u::Vector{Float64},r::Float64,n::Int,β::Float64,γ::Float64,κ::Vector{Float64})
 # projection onto intersection of soc cone and l2-norm ball
 # ---
 # x  : projected result 			(real n-vector) !
@@ -221,7 +221,10 @@ function soc2_ball!(x,z,θ1,θ2,u,r,n,β,γ,κ)
 
 end
 
-function admm!(x,y,u,z,f1,f2,α,β,ϵ,n,γ1,γ2,κ1,κ2)
+# tc: standin protocol for projection functions
+abstract type Projector end
+(::Projector)(v::Vector{Float64}, ψ::Vector{Float64}) = nothing
+function admm!(x::Vector{Float64},y::Vector{Float64},u::Vector{Float64},z::Vector{Float64},f1::Projector,f2::Projector,α::Float64,β::Float64,ϵ::Float64,n::Int,γ1::Float64,γ2::Float64,κ1::Vector{Float64},κ2::Vector{Float64})
 # projection onto intersection of two sets with respective projections defined by f1 and f2
 # ---
 # x  : projected result (copy 1)	(real n-vector) !
@@ -287,8 +290,7 @@ function admm!(x,y,u,z,f1,f2,α,β,ϵ,n,γ1,γ2,κ1,κ2)
 	end
 
 end
-
-function multi_admm!(x,y,u,z,f,α,β,ϵ,n,N,γ1,γ2,ψ,κ)
+function multi_admm!(x::Vector{Vector{Float64}},y::Vector{Vector{Float64}},u::Vector{Vector{Float64}},z::Vector{Float64},f::Vector{Projector},α::Float64,β::Float64,ϵ::Float64,n::Int,N::Int,γ1::Float64,γ2::Float64,ψ::Float64,κ::Vector{Float64})
 # projection onto intersection of N sets with projections defined by f[i], i=1,...,N
 # ---
 # x  : projected results (copy 1)	(N-vector of real n-vectors) !
@@ -305,8 +307,8 @@ function multi_admm!(x,y,u,z,f,α,β,ϵ,n,N,γ1,γ2,ψ,κ)
 # ψ  : temp storage variable  		(real scalar)                !
 # κ  : temp storage variable        (real n-vector)              !
 
-	@assert length(f)==N "No. of projection functions is not N."
-	# @assert N ≥ 3 "Use admm! for fewer than 3 sets."
+	#tc: @assert length(f)==N "No. of projection functions is not N."
+	# #tc: @assert N ≥ 3 "Use admm! for fewer than 3 sets."
 
 	# γ1 = 100.0
 	# ψ = 0.0 # iteration counter
@@ -379,5 +381,4 @@ function multi_admm!(x,y,u,z,f,α,β,ϵ,n,N,γ1,γ2,ψ,κ)
 	κ[1] = ψ
 
 end
-
 end

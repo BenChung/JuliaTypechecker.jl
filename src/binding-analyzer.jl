@@ -93,7 +93,6 @@ analyze_toplevel_lvalue(ctx::TypecheckContext, tctx::ToplevelContext, expr::Sema
 	NamedTupleAssignment(params::Vector{Union{IdentifierAssignment, TypedAssignment}}, loc) => map(param->analyze_toplevel_lvalue(param), params)
 	FunctionAssignment(name::FunctionName, args_stmts::Vector{FnArg}, kwargs_stmts::Vector{KwArg}, sparams::Vector{TyVar}, rett::Union{Expression, Nothing}, loc) => 
 		bind_function_name(ctx, tctx, name)
-	BroadcastAssignment(lhs::LValue, loc) => nothing
     UnionAllAssignment(name::LValue, tyargs::Vector{TyVar}, loc) => analyze_toplevel_lvalue(ctx, tctx, name)
 end
 analyze_bindings(ctx::TypecheckContext, tctx::ToplevelContext, expr::SemanticAST.ToplevelStmts) = @match expr begin
