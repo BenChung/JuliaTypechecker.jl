@@ -17,6 +17,7 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 SymbolServer = "cf896787-08d5-524d-9de7-132aaa0cb996"
 
 [compat]
+Plots = "1"
 julia = "1"
 
 [extras]
