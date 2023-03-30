@@ -713,9 +713,31 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 			end
 			(lctx, BasicType(Vector{canonize(elemty)}))
 		end
-		HCat(type::Union{Expression, Nothing}, elems::Vector{Union{Expression, Splat}}, _) => throw("not implemented")
-		VCat(type::Union{Expression, Nothing}, rows::Vector{Union{Row, Expression, Splat}}, _) => throw("not implemented")
-		NCat(type::Union{Expression, Nothing}, dim::Int, rows::Vector{Union{NRow, Expression}}, _) => throw("not implemented")
+		HCat(type::Union{Expression, Nothing}, elems::Vector{Union{Expression, Splat}}, _) => begin
+			elemtys = JlType[]
+			for elem in elems 
+				@match elem begin 
+					e::Expression => begin 
+						(lctx, ity) = typecheck_expression(lctx, e)
+						push!(elemtys, ity)
+					end
+					Splat(ex::Expression, _) =>  begin 
+						(lctx, ity) = typecheck_expression(lctx, e)
+						push!(elemtys, itertype(ity))
+					end
+				end
+			end
+			typecheck_fn_call(lctx, expr, BasicType(typeof(Base.hcat)), elemtys, Pair{Symbol, JlType}[])
+		end
+		VCat(type::Union{Expression, Nothing}, rows::Vector{Union{Row, Expression, Splat}}, _) => begin
+			(lctx, elemtys, nrows, has_rows) = typecheck_vcat_args(lctx, rows)
+			if !has_rows
+				typecheck_fn_call(lctx, expr, BasicType(typeof(Base.vcat)), elemtys, Pair{Symbol, JlType}[])
+			else 
+				typecheck_fn_call(lctx, expr, BasicType(typeof(Base.hvcat)), JlType[BasicType(Tuple{repeat([Int], nrows)...}); elemtys], Pair{Symbol, JlType}[])
+			end
+		end
+		NCat(type::Union{Expression, Nothing}, dim::Int, rows::Vector{Union{NRow, Expression}}, _) => (lctx, make_error(lctx.octx, expr, "Not implemented!", BasicType(Any)))
 		Generator(flatten::Bool, expr::Expression, iterators::Vector{Iterspec}, _) && gen => throw("Standalone generators are not currently supported; use a comprehension instead")
 		Comprehension(type::Union{Expression, Nothing}, gen::Generator, _)&&cmp => begin 
 			ictx = lctx
