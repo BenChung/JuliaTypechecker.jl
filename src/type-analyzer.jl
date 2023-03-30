@@ -4,7 +4,11 @@
 	SpecialFunction(fn::Function)
 	FunctionType(argtype::JlType, retty::JlType)
 end
-Base.show(io::IO, t::BasicType) = "BasicType($(show(io, t.type)))"
+function Base.show(io::IO, t::BasicType) 
+	print(io, "BasicType(")
+	show(io, t.type)
+	print(io, ")")
+end
 
 canonize(t::JlType) = @match t begin
 	BasicType(it) => it
@@ -12,6 +16,9 @@ canonize(t::JlType) = @match t begin
 	FunctionType(_, _) => Function
 	SpecialFunction(fn) => typeof(fn)
 end
+
+ub_tyvar(v::TypeVar) = v.ub
+ub_tyvar(t) = t
 
 spec_typeof(obj::Core.IntrinsicFunction) = SpecialFunction(obj)
 spec_typeof(obj::Type) = BasicType(Type{obj})
@@ -26,6 +33,9 @@ isstatictype(::Any, ::Any) = false
 
 typemeet(t1::JlType, ts::Vararg{JlType}) = typemeet(JlType[t1, ts...])
 typemeet(tys::Vector{T}) where T <: JlType = BasicType(Base.typejoin(canonize.(tys)...))
+
+unpack_typeof(t::BasicType) =
+	t.type isa Type ? t.type.parameters[1] : throw("Cannot unpack a non-type")
 
 function make_error(ctx::TypecheckContext, element::ASTNode, msg::String, fallback::JlType) 
     ctx.ledger[ctx.node_mapping[element]] = TypeError(msg)
@@ -62,7 +72,8 @@ get_scope_info(ctx::TypecheckContext, node::ASTNode) = find_parent_component(Sco
 function lookup_type(ctx::LocalContext, sym::Symbol, (@nospecialize loc::ASTNode))
 	mod = foldl((mod, modname) -> getfield(mod, modname), ctx.scope_info.path; init=Base)
 	if !isdefined(mod, sym)
-		rttype = make_error(ctx.octx, loc, "Type $sym not found in $mod", Any)
+		make_error(ctx.octx, loc, "Type $sym not found in $mod")
+		return Any
 	else
 		return getproperty(mod, sym)
 	end
@@ -97,20 +108,50 @@ evaluate_type_src(ctx::LocalContext, src::Expression) = @match src begin
 end
 function convert_type_internal(ctx::LocalContext, type::Expression, vars::Base.ImmutableDict{Symbol, TypeVar})
 	return @match type begin 
+		Quote(ast::JuliaSyntax.SyntaxNode, _) => begin 
+			if JuliaSyntax.kind(JuliaSyntax.head(ast)) == JuliaSyntax.K"quote" && typeof(JuliaSyntax.Expr(JuliaSyntax.child(ast, 1))) == Symbol 
+				JuliaSyntax.Expr(JuliaSyntax.child(ast, 1))
+			else 
+				make_error(ctx.octx, type, "Static checking does not support quotations in types"); Any 
+			end # todo
+		end
 		Quote(_, _) => begin make_error(ctx.octx, type, "Static checking does not support quotations in types"); Any end
 		Variable(:Any, _) => Any
-		Variable(sym, _) => sym in keys(vars) ? vars[sym] : lookup_type(ctx, sym, type)
+		Variable(sym, _) => begin
+			if sym in keys(vars) 
+				vars[sym] 
+			elseif sym in keys(ctx.variables)
+				varty = lookup_variable_type(ctx, sym, type)
+				return unpack_typeof(varty)
+			else 
+				res = lookup_type(ctx, sym, type)
+				return res
+			end
+		end
 		CallCurly(:Tuple, es, _) => Tuple{convert_type_internal.((ctx, ), es, (vars, ))...}
 		CallCurly(:Union, es, _) => Union{convert_type_internal.((ctx, ), es, (vars, ))...}
-		CallCurly(rec, es, _) => convert_type_internal(ctx, rec, vars){convert_type_internal.((ctx, ), es, (vars, ))...}
+		CallCurly(rec, es, _) => begin 
+			args = convert_type_internal.((ctx, ), es, (vars, ))
+			callee = convert_type_internal(ctx, rec, vars)
+			callee{args...}
+		end
 		WhereType(e, tvs, _) => 
 			if length(tvs) > 0 
-				var = first(tvs)
-				converted = TypeVar(var.name, isnothing(var.lb) ? Union{} : convert_type_internal(ctx, var.lb, vars), isnothing(var.ub) ? Any : convert_type_internal(ctx, var.ub, vars))
-				UnionAll(converted, convert_type_internal(ctx, e, Base.ImmutableDict(vars, var.name => converted)))
+				newvars = []
+				for var in tvs 
+					converted = TypeVar(var.name, isnothing(var.lb) ? Union{} : convert_type_internal(ctx, var.lb, vars), isnothing(var.ub) ? Any : convert_type_internal(ctx, var.ub, vars))
+					vars = Base.ImmutableDict(vars, var.name => converted)
+					push!(newvars, converted)
+				end
+				res = convert_type_internal(ctx, e, vars)
+				for newvar in newvars 
+					res = UnionAll(newvar, res)
+				end
+				return res
 			else
 				convert_type_internal(ctx, e, vars) 
 			end
+		FunCall(Variable(:typeof, _), [PositionalArg(arg, _)], _, _) => BasicType(Type{canonize(last(typecheck_expression(ctx, arg)))})
 		GetProperty(src, name, _) && prop => evaluate_type_src(ctx, prop)
 		other => begin make_error(ctx.octx, type, "Unrecognized form in type $other"); Any end
 	end
@@ -139,6 +180,9 @@ function extract_tuple_bindings(ctx::LocalContext, params::Vector{LValue}, types
 end
 
 function assignable(from::BasicType, to::BasicType) 
+	if from.type isa TypeVar && to.type isa TypeVar 
+		return from.type.ub <: to.type.ub
+	end
 	if from.type isa TypeVar 
 		return from.type.ub <: to.type
 	end
@@ -246,6 +290,11 @@ typecheck_lvalue(ctx::LocalContext, binding::LValue, (@nospecialize type::Union{
     UnionAllAssignment(name::LValue, tyargs::Vector{TyVar}, _) => throw("Type aliasing not supported yet")
 end
 
+@component struct FunctionInfo
+	namestring::String
+	nabstract::Int
+	nconcrete::Int
+end
 function typecheck_function(ctx::TypecheckContext, 
 	scope_info::ScopeInfo,
 	name::FunctionName, 
@@ -254,12 +303,14 @@ function typecheck_function(ctx::TypecheckContext,
 	sparams::Vector{TyVar}, 
 	(@nospecialize rett::Union{Expression, Nothing}), 
 	(@nospecialize body::Union{Expression, Nothing}))
-	
+	nconcrete = 0 
+	nabstract = 0
+
 	lctx = LocalContext(ctx, Base.ImmutableDict{Symbol, JlType}(), nothing, scope_info)
 	typeargs = Base.ImmutableDict{Symbol, TypeVar}()
 	optargs = []
 	for tyarg in sparams 
-		typeargs = Base.ImmutableDict{Symbol, TypeVar}(tyarg.name, convert_type_internal(lctx, tyarg, typeargs))
+		typeargs = Base.ImmutableDict{Symbol, TypeVar}(typeargs, tyarg.name, convert_type_internal(lctx, tyarg, typeargs))
 	end
 	rtty = !isnothing(rett) ? convert_type(lctx, rett, typeargs) : JuliaTypechecker.BasicType(Any)
 	lctx.return_type = rtty
@@ -267,6 +318,11 @@ function typecheck_function(ctx::TypecheckContext,
 		argtype = isnothing(arg.type) ? JuliaTypechecker.BasicType(Any) : convert_type(lctx, arg.type, typeargs)
 		if !isnothing(arg.binding)
 			lctx = bind_argument(lctx, arg.binding, argtype)
+		end
+		if isabstracttype(canonize(argtype)) || canonize(argtype) isa TypeVar
+			nabstract += 1
+		else
+			nconcrete += 1
 		end
 		push!(optargs, arg.default_value => argtype)
 	end
@@ -288,15 +344,20 @@ function typecheck_function(ctx::TypecheckContext,
 
 	nvars = lctx.variables
 	for (name, var) in typeargs 
-		nvars = Base.ImmutableDict(nvars, name=>BasicType(var))
+		nvars = Base.ImmutableDict(nvars, name=>BasicType(Type{var}))
 	end
 	lctx = LocalContext(lctx)
 	lctx.variables = nvars
+	
+    lctx.octx.ledger[lctx.octx.node_mapping[name]] = FunctionInfo(string(name), nabstract, nconcrete)
 
 	if !isnothing(body)
 		lctx, rty = typecheck_expression(lctx, body)
+		if rty isa Type 
+			println(body)
+		end
 		if !assignable(rty, rtty)
-			make_error(ctx.octx, body, "cannot assign from the return type $rty to the required $rtty")
+			make_error(ctx, body, "cannot assign from the return type $rty to the required $rtty")
 		end
 	end
 	return BasicType(Function)
@@ -322,6 +383,28 @@ dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), un::Union
 	argtypes::Vector{Any}
 	returns::Any
 end
+unpack_vars(ctx::LocalContext, typ, used::Set{TypeVar}, shadowed::Base.ImmutableDict{Symbol, Nothing}) = typ # todo: recurse into unions/datatypes
+function unpack_vars(ctx::LocalContext, typ::DataType, used::Set{TypeVar}, shadowed::Base.ImmutableDict{Symbol, Nothing}) 
+	if length(typ.parameters) == 0 return typ end
+	vars = unpack_vars.((ctx, ), typ.parameters, (used, ), (shadowed, ))
+	return typ.name.wrapper{vars...}
+end
+unpack_vars(ctx::LocalContext, typ::UnionAll, used::Set{TypeVar}, shadowed::Base.ImmutableDict{Symbol, Nothing}) = UnionAll(typ.var, unpack_vars(ctx, typ.body, used, Base.ImmutableDict(shadowed, typ.var.name => nothing)))
+function unpack_vars(ctx::LocalContext, typ::TypeVar, used::Set{TypeVar}, shadowed::Base.ImmutableDict{Symbol, Nothing})
+	if haskey(shadowed, typ.name) || !haskey(ctx.variables, typ.name)
+		return typ
+	else 
+		push!(used, typ)
+		return typ
+	end
+end
+function wrap_type(typ, vars::Set{TypeVar})
+	for var in vars 
+		typ = UnionAll(var, typ)
+	end
+	return typ
+end
+
 function dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), (@nospecialize fn::Union{Function,DataType, Type{T} where T}), (@nospecialize canonical_args))
     #println("dispatching onto $fn with args $canonical_args")
 	rt = Any
@@ -347,44 +430,51 @@ function dispatch_typed_direct(ctx::LocalContext, (@nospecialize loc::ASTNode), 
     else
         fn_rec = fn # fn.parameters[1]
     end
-    argtuple = Tuple{fn,canonical_args...}
-    #@debug ("Fetching method $fn_rec with signature $(canonical_args) with fn $fn fnty $(typeof(fn))")
+	used = Set{TypeVar}(); shadowed = Base.ImmutableDict{Symbol, Nothing}()
+	canonical_args = (unpack_vars.((ctx, ), canonical_args, (used, ), (shadowed, )))
+    argtuple = wrap_type(Tuple{fn,canonical_args...}, used)
     directly_callable = Base._methods_by_ftype(Tuple{fn_rec,canonical_args...}, -1, typemax(UInt64))
-	#println("callables: $directly_callable")
-    if length(directly_callable) > 0 # there is a method that we can
-        has_candidate = false
-        rt = Union{}
-        for mdef in directly_callable
-            #println("calling method on $mdef")
-            #println("is $argtuple <: $(mdef.method.sig)? $(argtuple <: mdef.method.sig) and args $(argtuple)")
-            rty = Core.Compiler.typeinf_type(interp, mdef.method, mdef.spec_types, mdef.sparams)
-            rt = Core.Compiler.tmerge(rty, rt)
-            #println("Callable $((mdef::Core.MethodMatch).method.sig), returning $rty, acc rty $rt")
-			if argtuple <: mdef.method.sig
-				has_candidate = true
+	output = ""
+	try
+		#println("callables: $directly_callable")
+		if length(directly_callable) > 0 # there is a method that we can
+			has_candidate = false
+			rt = Union{}
+			for mdef in directly_callable
+				#println("calling method on $mdef")
+				#println("is $argtuple <: $(mdef.method.sig)? $(argtuple <: mdef.method.sig) and args $(argtuple)")
+				rty = Core.Compiler.typeinf_type(interp, mdef.method, mdef.spec_types, mdef.sparams)
+				rt = typejoin(rty, rt)
+				#println("Callable $((mdef::Core.MethodMatch).method.sig), returning $rty, acc rty $rt")
+				if argtuple <: mdef.method.sig
+					has_candidate = true
+				end
 			end
-        end
-        if has_candidate
-			ctx.octx.ledger[ctx.octx.node_mapping[loc]] = Dispatch(canonical_args, rt)
-            return BasicType(rt)
-        end
-        # todo: check if there's an interface declared for this type
-    end
-	buff = IOBuffer()
-	dump(buff, fn_rec)
-	@debug "accessing instance on $(read(buff, String)) $(fn_rec === nothing)"
-	if isdefined(fn_rec, :instance)
-    	instance = fn_rec.instance
-	else 
-		instance = nothing 
+			if has_candidate
+				#println("Success calling $fn; returning $rt")
+				ctx.octx.ledger[ctx.octx.node_mapping[loc]] = Dispatch(canonical_args, rt)
+				return BasicType(rt)
+			end
+			# todo: check if there's an interface declared for this type
+		end
+		buff = IOBuffer()
+		dump(buff, fn_rec)
+		if isdefined(fn_rec, :instance)
+			instance = fn_rec.instance
+		else 
+			instance = nothing 
+		end
+		output = """Invalid method call $fn_rec with args $canonical_args
+			Searching for functions using signature $argtuple; attempts:
+			$(join(["$(mdef.method.sig); argtuple <: typ?: $(argtuple <: mdef.method.sig)" for mdef in Iterators.take(directly_callable, 5)], "\n"))
+		"""
+	catch e 
+		output = """Invalid method call $fn_rec with args $canonical_args
+			Searching for functions using signature $argtuple; attempts:
+			$(join(["$(mdef.method.sig); argtuple <: typ?: $(argtuple <: mdef.method.sig)" for mdef in Iterators.take(directly_callable, 5)], "\n"));
+			encountered exception while dispatching $e
+		"""
 	end
-    output = """Invalid method call $fn_rec with args $canonical_args
-    	Searching for functions using signature $argtuple; attempts:
-    	$(join(["$(mdef.method.sig); argtuple <: typ?: $(argtuple <: mdef.method.sig)" for mdef in Iterators.take(directly_callable, 5)], "\n"))
-    """
-	# out of all methods
-	# $(methods(instance))
-    @debug "throwing error $output"
 	make_error(ctx.octx, loc, output, BasicType(rt))
 end
 
@@ -472,9 +562,9 @@ function typecheck_fn_call(ictx::LocalContext, (@nospecialize inv::ASTNode), rec
 	else 
 		#println("making a function call onto $rectyp")
 		if rectyp isa SpecialFunction
-			res = dispatch_intrinsic(rectyp.fn, Any[canonize(arg) for arg in pos_args])
+			res = dispatch_intrinsic(rectyp.fn, Any[ub_tyvar(canonize(arg)) for arg in pos_args])
 		else
-			#println("not a special function")
+			#println("not a special function $rectyp $(typeof(rectyp)) $(pos_args) $(typeof.(pos_args))")
 			res = dispatch_typed_direct(ictx, inv, canonize(rectyp), canonize.(pos_args))
 		end
 		return (ictx, res)
@@ -522,6 +612,31 @@ typecheck_iterator(ctx::LocalContext, i::Iterspec) = @match i begin
 	end
 end
 
+function typecheck_vcat_args(lctx::LocalContext, elems::Vector{<:Union{Row, Expression, Splat}})
+	elemtys = JlType[]
+	has_rows = false
+	nrows = 0
+	for elem in elems 
+		@match elem begin 
+			e::Expression => begin 
+				(lctx, ity) = typecheck_expression(lctx, e)
+				push!(elemtys, ity)
+				nrows += 1
+			end
+			Row(relems, _) => begin 
+				(lctx, itys, nrows, _) = typecheck_vcat_args(lctx, relems)
+				append!(elemtys, itys)
+				nrows += 1
+				has_rows = true
+			end
+			Splat(ex::Expression, _) =>  begin 
+				make_error(lctx.octx, cond, "Splatting in vcat/hcat not supported")
+				return (lctx, [], 0)
+			end
+		end
+	end
+	return (lctx, elemtys, nrows, has_rows)
+end
 
 function typecheck_expression(lctx::LocalContext, expr::Expression)
 	@match expr begin 
@@ -534,7 +649,7 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 		MacroDef(name::ResolvedName, arguments::Vector{FnArg}, sparams::Vector{TyVar}, rett::Union{Expression, Nothing}, body::Union{Expression, Nothing}, _) => 
 			throw("not implemented")
 		Block(exprs::Vector{Expression}, _) => begin 
-			(lctx, rtty) = (lctx, Nothing)
+			(lctx, rtty) = (lctx, BasicType(Nothing))
 			for expr in exprs 
 				res = typecheck_expression(lctx, expr)
 				(lctx, rtty) = res
@@ -576,8 +691,8 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 		SemanticAST.Broadcast(op::Expression, _) => (lctx, make_error(lctx.octx, expr, "Not implemented", BasicType(Any)))
 		FunCall(Variable(:(&&) || :(||), _), [PositionalArg(l, _), PositionalArg(r, _)], _, _) => begin
 			ictx = typecheck_conditional(lctx, l)
-			ictx = typecheck_conditional(ictx, r)
-			return (lctx, BasicType(Bool))
+			(ictx, rty) = typecheck_expression(ictx, r)
+			return (lctx, rty)
 		end
 		FunCall(SemanticAST.Broadcast(op::Expression, _), pos_args::Vector{PositionalArgs}, kw_args::Vector{Union{KeywordArg, SplatArg}}, _)&&fn => begin 
 			(ictx, rectyp) = typecheck_expression(lctx, op)
@@ -590,7 +705,6 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 			return typecheck_fn_call(ictx, assignment, BasicType(typeof(Base.broadcast!)), JlType[BasicType(typeof(Base.identity)); ltyp; rtyp], Pair{Symbol, JlType}[])
 		end
 		FunCall(receiver::Expression, pos_args::Vector{PositionalArgs}, kw_args::Vector{Union{KeywordArg, SplatArg}}, _)&&fn => begin 
-			println("calling $fn")
 			typecheck_fn_call(lctx, fn, receiver, pos_args, kw_args)
 		end
 		GetIndex(arr::Expression, arguments::Vector{PositionalArgs}, _) => begin 
@@ -617,13 +731,6 @@ function typecheck_expression(lctx::LocalContext, expr::Expression)
 		Update(op::Symbol, lhs::LValue, rhs::Expression, _) => begin 
 			(ictx, lty, _) = typecheck_lvalue(lctx, lhs, nothing)
 			(ictx, rty) = typecheck_expression(ictx, rhs)
-			if isnothing(lty) || isnothing(rty)
-				println("nothing returned")
-				println("lty: $lty")
-				println("rty: $rty")
-				println("left expression: $lhs")
-				println("right expression: $rhs")
-			end
 			return typecheck_fn_call(ictx, expr, lookup_variable_type(ictx, Symbol(string(op)[1:end-1]), expr), JlType[lty, rty], Pair{Symbol, JlType}[])
 		end
 		SemanticAST.BroadcastUpdate(op::Symbol, lhs::Expression, rhs::Expression, _)&&assignment => begin
