@@ -23,6 +23,12 @@ function to_entities(m::TypecheckContext, e, parent::Union{Entity, Nothing})
         end
         node = Entity(m.ledger)
         m.node_mapping[c] = node
+        m.ast_mapping[node] = c
+        if (!isnothing(parent))
+            parent_component = m.ledger[parent][ASTComponent]
+            m.node_parents[c] = parent_component.node
+        end
+
         m.ledger[node] = ASTComponent(c, parent)
         parent = node
     end
@@ -31,6 +37,10 @@ function to_entities(m::TypecheckContext, e, parent::Union{Entity, Nothing})
             return
         end
         node = m.node_mapping[c]
+        if haskey(m.node_parents, node)
+            parent = m.node_parents[node]
+        end
+
         if ASTComponent in m.ledger[node]
             component = m.ledger[node][ASTComponent]
             parent=component.parent

@@ -24,8 +24,13 @@ end
 mutable struct TypecheckContext
     ledger::Ledger
     node_mapping::Dict{ASTNode, Entity}
+    ast_mapping::Dict{Entity, ASTNode}
+    node_parents::Dict{ASTNode, ASTNode}
     file_resolver::FileSource
     store::Union{SymbolServerInstance, Nothing}
+    TypecheckContext(ledger::Ledger, file_resolver::FileSource, store::Union{SymbolServerInstance, Nothing}) =
+        new(ledger, Dict{ASTNode, Entity}(), Dict{Entity, ASTNode}(), Dict{ASTNode, ASTNode}(), file_resolver, store)
+
 end
 
 load_file(f::FileSource, relative_root::String, filename::String) = f.files[filename]

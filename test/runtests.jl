@@ -1,5 +1,5 @@
 using JuliaTypechecker, JuliaSyntax, Overseer, SymbolServer
-using MLStyle, Random
+using MLStyle
 using SemanticAST
 import SemanticAST: just_argslist, flatten_where_expr, analyze_typevar, ASTException, ASTNode
 import JuliaTypechecker: Binding, Path, PathInfo, analyze_scope, ModuleDefinition, IncludeFiles, TypeError, get_definition, get_definition_descending, analyze_bindings, ScopeInfo, InFile, Definition, ToplevelContext
@@ -9,7 +9,7 @@ const SN = JuliaSyntax.SyntaxNode
 const SH = JuliaSyntax.SyntaxHead
 childof = JuliaSyntax.child
 kindof(ex) = JuliaSyntax.kind(JuliaSyntax.head(ex))
-#=
+
 toplevel_tests() = [ 
 	:struct => [
 		"struct Foo end" => "StructDefStmt(:Foo, Symbol[], nothing, [], [])",
@@ -91,7 +91,7 @@ struct ErrorResult end
                 m = Ledger(stage)
 				r = DictFileSource(Dict{String, String}())
 				ssi = SymbolServerInstance(".", nothing)
-				ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+				ctx = TypecheckContext(m, r, ssi)
 				expr = expand_toplevel(childof(JuliaSyntax.parseall(SN, input), 1), ExpandCtx(true, false))
                 JuliaTypechecker.to_entities(ctx, expr, nothing)
 				SemanticAST.visit(c -> (if c isa ASTNode @test haskey(ctx.node_mapping, c) end), c -> (), expr)
@@ -107,7 +107,7 @@ end
 		m = Ledger(stage)
 		r = DictFileSource(Dict{String, String}())
 		ssi = SymbolServerInstance(".", nothing)
-		ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+		ctx = TypecheckContext(m, r, ssi)
 		expr = expand_toplevel(childof(JuliaSyntax.parseall(SN, "if x < y; end; if x < y; end; if x < y; end; if x < y; end;if x < y; end; if x < y; end"), 1), ExpandCtx(true, false))
 		JuliaTypechecker.to_entities(ctx, expr, nothing)
 		SemanticAST.visit(c -> (if c isa ASTNode 
@@ -141,7 +141,7 @@ scope_tests() = [
 			stage = Stage(:typechecker, [])
 			m = Ledger(stage)
 			ssi = SymbolServerInstance(".", nothing)
-			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+			ctx = TypecheckContext(m, r, ssi)
 
 			entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, filedict["root"]), ExpandCtx(true, false))
 			JuliaTypechecker.to_entities(ctx, entry, nothing)
@@ -188,7 +188,7 @@ binding_tests() = [
 			stage = Stage(:typechecker, [])
 			m = Ledger(stage)
 			ssi = SymbolServerInstance(".", nothing)
-			ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+			ctx = TypecheckContext(m, r, ssi)
 
 			entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, filedict["root"]), ExpandCtx(true, false))
 			JuliaTypechecker.to_entities(ctx, entry, nothing)
@@ -226,7 +226,7 @@ end
 		stage = Stage(:typechecker, [])
 		m = Ledger(stage)
 		ssi = SymbolServerInstance(".", nothing)
-		ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+		ctx = TypecheckContext(m, r, ssi)
 
 		root = Entity(m)
 		default_context = JuliaTypechecker.LocalContext(ctx, Base.ImmutableDict{Symbol, JuliaTypechecker.JlType}(), nothing, JuliaTypechecker.ScopeInfo([:Base], root, nothing, Entity[]))
@@ -445,7 +445,7 @@ end)
 		stage = Stage(:typechecker, [])
 		m = Ledger(stage)
 		ssi = SymbolServerInstance(".", nothing)
-		ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+		ctx = TypecheckContext(m, r, ssi)
 
 		
 		root = Entity(m)
@@ -497,7 +497,7 @@ end)
 	@test check_string("Float64(2)") == JuliaTypechecker.BasicType(Float64)
 	#@test check_string(exponent) == JuliaTypechecker.BasicType(Function)
 end
-=#
+
 function walk_to_function(ctx::TypecheckContext, e)
 	currrent_component = ctx.ledger[JuliaTypechecker.ASTComponent][e]
 	node = currrent_component.node
@@ -531,24 +531,25 @@ function get_toplevel_functions(expr::SemanticAST.ToplevelStmts, funcs=[])
 	end
 	return funcs
 end
-	
+
+#=
 @testset "Load pipg" begin 
 	r = LiveFileSource()
 	stage = Stage(:typechecker, [])
 	m = Ledger(stage)
 	ssi = SymbolServerInstance(".", nothing)
-	ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+	ctx = TypecheckContext(m, r, ssi)
 
 	include("examples/pipg/ex1_problem_data.jl")
 	include("examples/pipg/solver_suite.jl")
-	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/pipg/solver_suite.jl", String), filename="examples/pipg/solver_suite.jl"), ExpandCtx(true, false))
+	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/pipg/ex1_problem_data.jl", String), filename="examples/pipg/ex1_problem_data.jl"), ExpandCtx(true, false))
 	JuliaTypechecker.to_entities(ctx, entry, nothing)
 
 	root = m[ctx.node_mapping[entry]]
 	
 	toplevel_scope = ScopeInfo([:Main], root, nothing, [])
 	m[ctx.node_mapping[entry]] = toplevel_scope
-	m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("examples/pipg/solver_suite.jl")
+	m[ctx.node_mapping[entry]] = JuliaTypechecker.InFile("examples/pipg/ex1_problem_data.jl")
 	
 	analyze_scope(ctx, [:Main], toplevel_scope, entry)
 	funcs = []
@@ -587,43 +588,21 @@ end
 			n+=1
 		end
 	end
-	println("functions without errors:")
+	println("functions without errors: $(length(tlfs))")
 	for tlf in tlfs 
 		println(tlf)
 	end
-
-	#=
-	with_errors = Set(funcs)
-	for tlf in tlfs 
-		delete!(with_errors, tlf)
+	
+	nabstract = 0
+	nconcrete = 0
+	for fic in @entities_in(ctx.ledger, JuliaTypechecker.FunctionInfo) 
+		fi = ctx.ledger[JuliaTypechecker.FunctionInfo][fic]
+		nabstract += fi.nabstract 
+		nconcrete += fi.nconcrete
+		println("name: $(fi.namestring) nabstract: $(fi.nabstract) nconcrete: $(fi.nconcrete)")
 	end
+	println("concrete args: $nconcrete abstract: $nabstract")
 
-	with_errors_list = collect(with_errors)
-	Random.shuffle!(with_errors_list)
-	for exfunc in with_errors_list[1:10]
-		basenode = exfunc.location.basenode
-		line, col = JuliaSyntax.source_location(basenode.source, basenode.position)
-		linecol = "$line:$col"
-		filename = basenode.source.filename
-		println("check $filename $linecol")
-	end
-
-	ninvs_anyargs = 0
-	ninvs_nonanyargs = 0
-	ninvs_anyrt = 0
-	for dent in @entities_in(m[JuliaTypechecker.Dispatch])
-		dres = m[dent][JuliaTypechecker.Dispatch]
-		if all(x->x != Any, dres.argtypes)
-			ninvs_nonanyargs += 1
-			if dres.returns == Any 
-				ninvs_anyrt += 1
-			end
-		else 
-			ninvs_anyargs += 1
-		end
-	end
-	println("any invocations: $ninvs_anyargs non-any functions: $ninvs_nonanyargs returning $ninvs_anyrt")
-	=#
 	@test false
 end
 
@@ -632,7 +611,7 @@ end
 	stage = Stage(:typechecker, [])
 	m = Ledger(stage)
 	ssi = SymbolServerInstance(".", nothing)
-	ctx = TypecheckContext(m, Dict{ASTNode, Entity}(), r, ssi)
+	ctx = TypecheckContext(m, r, ssi)
 
 	entry = expand_toplevel(JuliaSyntax.parseall(JuliaSyntax.SyntaxNode, read("examples/extracted.jl", String), filename="examples/extracted.jl"), ExpandCtx(true, false))
 	JuliaTypechecker.to_entities(ctx, entry, nothing)
@@ -645,12 +624,16 @@ end
 	
 	analyze_scope(ctx, [:Base], toplevel_scope, entry)
 	funcs = []
+	# protocol inserts
+#=
 	for file_root_entity in @entities_in(m[JuliaTypechecker.InFile])
 		root_node = m[JuliaTypechecker.ASTComponent][file_root_entity].node
 		JuliaTypechecker.typecheck(ctx, root_node)
 		get_toplevel_functions(entry, funcs)
 	end
+=#
 	JuliaTypechecker.typecheck(ctx, entry)
+	get_toplevel_functions(entry, funcs)
 
 	cs = components(m, JuliaTypechecker.TypeError)
 	if length((cs)) > 0
@@ -659,8 +642,7 @@ end
 	fn_errors = extract_errors(ctx, entry)
 	
 	tlfs = Set(funcs)
-	
-	for fnerr in fn_errors 
+	for fnerr in fn_errors
 		fn, errs = fnerr 
 		delete!(tlfs, fn)
 		println("Errors found in function: ")
@@ -669,8 +651,13 @@ end
 		println("")
 		for err in errs 
 			println("err $n")
-			println(err.msg)
-			println("at $filename $linecol")
+			node = last(err)
+			basenode = node.location.basenode
+			line, col = JuliaSyntax.source_location(basenode.source, basenode.position)
+			linecol = "$line:$col"
+			filename = basenode.source.filename
+			println(first(err).msg)
+			println("at $line:$col in $filename")
 			println("")
 			n+=1
 		end
@@ -679,6 +666,19 @@ end
 	for tlf in tlfs 
 		println(tlf)
 	end
+	println("checked $(length(tlfs)) functions")
+	println("out of a total of $(length(funcs)) functions")
+
+	
+	nabstract = 0
+	nconcrete = 0
+	for fic in @entities_in(ctx.ledger, JuliaTypechecker.FunctionInfo) 
+		fi = ctx.ledger[JuliaTypechecker.FunctionInfo][fic]
+		nabstract += fi.nabstract 
+		nconcrete += fi.nconcrete
+		println("name: $(fi.namestring) nabstract: $(fi.nabstract) nconcrete: $(fi.nconcrete)")
+	end
+	println("concrete args: $nconcrete abstract: $nabstract")
 
 	#=
 	with_errors = Set(funcs)
@@ -714,3 +714,4 @@ end
 	=#
 	@test false
 end
+=#
